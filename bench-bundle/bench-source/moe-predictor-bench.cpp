@@ -1585,8 +1585,7 @@ int main(int argc, char ** argv) {
                     LOG_ERR("expert-cache: create failed\n");
                     return 1;
                 }
-                // moe_cuda_expert_cache_install_hook(bc.expert_cache);   // DEBUG: disabled to test routing diff
-                LOG_WRN("DEBUG: hook NOT installed — prefetch only, no d2d\n");
+                moe_cuda_expert_cache_install_hook(bc.expert_cache);
                 LOG_INF("expert-cache: %d slots × %zu bytes = %.1f MiB; hook installed\n",
                         n_slots, slot_size,
                         ((double)n_slots * slot_size) / (1024.0 * 1024.0));
