@@ -256,6 +256,14 @@ extern "C" int moe_cuda_expert_cache_try_d2d(
     if (!g_cache) return 0;
     if (!tensor_name || !input_cpy_data) return 0;
 
+    // DEBUG: always fall through to test if d2d itself is the bug
+    if (const char * dbg = getenv("MOE_CACHE_FORCE_FALLTHROUGH")) {
+        if (dbg[0] == '1') {
+            g_cache->stat_d2d_partial_miss.fetch_add(1, std::memory_order_relaxed);
+            return 0;
+        }
+    }
+
     int layer = -1, kind = -1;
     if (!parse_tensor_name(tensor_name, layer, kind)) return 0;
 
