@@ -214,6 +214,42 @@ extern "C" int moe_cuda_expert_cache_touch(
     return 1;
 }
 
+extern "C" int moe_cuda_expert_cache_prefetch(
+    moe_cuda_expert_cache * c,
+    int layer_id, int expert_id, int kind,
+    const void * host_src, size_t nbytes)
+{
+    if (!c || kind < 0 || kind > 2 || !host_src) return 0;
+    if (nbytes != c->expert_size[kind]) return 0;
+
+    expert_key key{layer_id, expert_id, kind};
+    int slot_idx = -1;
+    {
+        std::lock_guard<std::mutex> lk(c->mu);
+        auto it = c->index.find(key);
+        if (it != c->index.end()) {
+            touch_slot(c, it->second);
+            c->stat_prefetches_dedup.fetch_add(1, std::memory_order_relaxed);
+            return 1;
+        }
+        slot_idx = alloc_or_evict_slot(c);
+        if (slot_idx < 0) return 0;
+        auto & s = c->slots[slot_idx];
+        s.occupied = true;
+        s.key = key;
+        s.bytes_used = nbytes;
+        c->lru_order.push_front(slot_idx);
+        s.lru_it = c->lru_order.begin();
+        c->index[key] = slot_idx;
+    }
+    void * dst = c->pool + (size_t)slot_idx * c->slot_size;
+    CUDA_CHECK(cudaMemcpyAsync(dst, host_src, nbytes,
+                                cudaMemcpyHostToDevice, c->prefetch_stream));
+    c->stat_prefetches.fetch_add(1, std::memory_order_relaxed);
+    c->stat_bytes_prefetched.fetch_add((int64_t)nbytes, std::memory_order_relaxed);
+    return 1;
+}
+
 extern "C" void moe_cuda_expert_cache_drain(moe_cuda_expert_cache * c) {
     if (!c || !c->prefetch_stream) return;
     cudaStreamSynchronize(c->prefetch_stream);
@@ -394,7 +430,9 @@ extern "C" void moe_cuda_expert_cache_snapshot(
 extern "C" void moe_cuda_expert_cache_install_hook(moe_cuda_expert_cache * c) {
     g_cache = c;
     ggml_set_moe_expert_cache_hook(moe_cuda_expert_cache_try_d2d);
-    ggml_set_moe_expert_cache_snapshot_hook(moe_cuda_expert_cache_snapshot);
+    // Note: snapshot hook intentionally NOT installed. Cache is populated
+    // exclusively via moe_cuda_expert_cache_prefetch (H→D from CPU mmap).
+    // The L2 snapshot path was a workaround for a misdiagnosed bug.
 }
 
 // ── Stats ───────────────────────────────────────────────────────────────

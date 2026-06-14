@@ -989,19 +989,35 @@ static bool bench_cb(struct ggml_tensor * t, bool ask, void * user_data) {
         b->last_prediction_k[target_layer] = k;
 
 #ifdef MOE_CUDA_EXPERT_CACHE_AVAILABLE
-        // ── Predictor LRU touch on predicted experts ──
-        // The cache is L2: populated by D→D snapshot of post-PCIe input_cpy
-        // bytes (the actual converted format ggml-cuda uses). Predictor's
-        // role here is just to PROMOTE predicted (layer, expert) pairs in
-        // the LRU so they're retained over experts the predictor didn't pick.
-        // For an expert never seen yet, touch is a no-op until snapshot fires.
-        if (b->expert_cache != nullptr) {
+        // ── H→D prefetch on predicted experts ──
+        // For each predicted (target_layer, e), kick off cudaMemcpyAsync from
+        // CPU mmap into a pool slot. try_d2d serves subsequent copy_experts
+        // calls from cache (D→D, fast) when all experts in a run are cached.
+        // First-touch misses still pay PCIe via the normal ggml path.
+        if (b->expert_cache != nullptr &&
+            target_layer < (int)b->expert_ranges.size()) {
+            const auto & ranges = b->expert_ranges[target_layer];
             for (int p = 0; p < k; ++p) {
                 const int32_t e = b->last_prediction_for_layer[target_layer][p];
                 if (e < 0 || e >= b->weights.num_experts) continue;
-                moe_cuda_expert_cache_touch(b->expert_cache, target_layer, e, 0);
-                moe_cuda_expert_cache_touch(b->expert_cache, target_layer, e, 1);
-                moe_cuda_expert_cache_touch(b->expert_cache, target_layer, e, 2);
+                if (ranges.gate.base_addr && ranges.gate.per_expert_bytes) {
+                    moe_cuda_expert_cache_prefetch(
+                        b->expert_cache, target_layer, e, /*kind=gate*/0,
+                        ranges.gate.base_addr + (size_t)e * ranges.gate.per_expert_bytes,
+                        ranges.gate.per_expert_bytes);
+                }
+                if (ranges.up.base_addr && ranges.up.per_expert_bytes) {
+                    moe_cuda_expert_cache_prefetch(
+                        b->expert_cache, target_layer, e, /*kind=up*/1,
+                        ranges.up.base_addr + (size_t)e * ranges.up.per_expert_bytes,
+                        ranges.up.per_expert_bytes);
+                }
+                if (ranges.down.base_addr && ranges.down.per_expert_bytes) {
+                    moe_cuda_expert_cache_prefetch(
+                        b->expert_cache, target_layer, e, /*kind=down*/2,
+                        ranges.down.base_addr + (size_t)e * ranges.down.per_expert_bytes,
+                        ranges.down.per_expert_bytes);
+                }
                 b->expert_cache_prefetch_calls++;
             }
         }

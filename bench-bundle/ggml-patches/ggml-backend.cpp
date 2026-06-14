@@ -1675,6 +1675,41 @@ static enum ggml_status ggml_backend_sched_compute_splits(ggml_backend_sched_t s
                                 first_id, last_id - first_id + 1,
                                 input_cpy->data, expert_offset,
                                 expert_size, total_bytes) == 1;
+
+                            // ── MOE-DBG: verify cache-hit bytes match CPU src ──
+                            // Since set_tensor_async is byte-identical to host
+                            // mmap (confirmed by MOE_DEBUG_DUMP_BYTES dump), the
+                            // bytes the cache wrote into input_cpy MUST equal
+                            // the bytes at (input->data + expert_offset). If
+                            // they don't, the cache is filling slots from the
+                            // wrong source OR copying to the wrong dst offset.
+                            if (cache_hit) {
+                                static std::atomic<int> s_verify_done{0};
+                                if (s_verify_done.load(std::memory_order_relaxed) == 0 &&
+                                    getenv("MOE_CACHE_VERIFY")) {
+                                    int expected = 0;
+                                    if (s_verify_done.compare_exchange_strong(expected, 1)) {
+                                        ggml_backend_synchronize(split_backend);
+                                        const size_t dump_n = std::min<size_t>(64, total_bytes);
+                                        unsigned char gpu_buf[64] = {0};
+                                        ggml_backend_tensor_get(input_cpy,
+                                            gpu_buf, expert_offset, dump_n);
+                                        const unsigned char * cpu_buf =
+                                            (const unsigned char *)input->data + expert_offset;
+                                        int diff = memcmp(cpu_buf, gpu_buf, dump_n);
+                                        fprintf(stderr, "\n[MOE-VERIFY] cache-hit tensor=%s first_id=%d expert_size=%zu\n",
+                                            input->name ? input->name : "?",
+                                            first_id, expert_size);
+                                        fprintf(stderr, "[MOE-VERIFY] CPU src: ");
+                                        for (size_t i = 0; i < dump_n; ++i) fprintf(stderr, "%02x ", cpu_buf[i]);
+                                        fprintf(stderr, "\n[MOE-VERIFY] GPU dst: ");
+                                        for (size_t i = 0; i < dump_n; ++i) fprintf(stderr, "%02x ", gpu_buf[i]);
+                                        fprintf(stderr, "\n[MOE-VERIFY] memcmp=%d  %s\n\n",
+                                            diff, diff == 0 ? "(CACHE CORRECT)" : "(CACHE WRONG — bug in prefetch source or d2d placement)");
+                                        fflush(stderr);
+                                    }
+                                }
+                            }
                         }
 
                         if (!cache_hit) {

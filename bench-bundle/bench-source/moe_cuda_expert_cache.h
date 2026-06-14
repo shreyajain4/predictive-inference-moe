@@ -57,11 +57,21 @@ void moe_cuda_expert_cache_destroy(moe_cuda_expert_cache * c);
 
 // LRU "touch" — if (layer, expert, kind) is in the cache, promote to
 // most-recently-used so it's less likely to be evicted. No-op on miss.
-// Used by the bench's predictor: predicted experts get touched so they're
-// retained across decode steps.
 int moe_cuda_expert_cache_touch(
     moe_cuda_expert_cache * c,
     int layer_id, int expert_id, int kind);
+
+// H→D prefetch from CPU mmap into a pool slot. If already cached, just
+// touches LRU and returns 1 (dedup). On miss, allocates a slot (evicting
+// LRU if needed) and issues cudaMemcpyAsync on the prefetch stream.
+// Returns 1 on success (hit or queued copy), 0 if size/kind invalid.
+int moe_cuda_expert_cache_prefetch(
+    moe_cuda_expert_cache * c,
+    int          layer_id,
+    int          expert_id,
+    int          kind,           // 0=gate, 1=up, 2=down
+    const void * host_src,       // CPU mmap pointer to first byte
+    size_t       nbytes);        // must equal expert_size[kind]
 
 // Wait for all in-flight cache operations to finish (typically called before bench exits).
 void moe_cuda_expert_cache_drain(moe_cuda_expert_cache * c);
