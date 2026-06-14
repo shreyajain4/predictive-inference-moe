@@ -407,9 +407,12 @@ extern "C" void moe_cuda_expert_cache_snapshot(
 extern "C" void moe_cuda_expert_cache_install_hook(moe_cuda_expert_cache * c) {
     g_cache = c;
     ggml_set_moe_expert_cache_hook(moe_cuda_expert_cache_try_d2d);
-    // Note: snapshot hook intentionally NOT installed. Cache is populated
-    // exclusively via moe_cuda_expert_cache_prefetch (H→D from CPU mmap).
-    // The L2 snapshot path was a workaround for a misdiagnosed bug.
+    // Snapshot hook: for every expert ggml PCIes into input_cpy (i.e., one
+    // we didn't have cached), copy those bytes D→D into a pool slot. Free
+    // cache fill — same bytes already crossed PCIe, we just retain them.
+    // Combined with predictor prefetch, the cache is union of {observed}
+    // and {anticipated}. Higher hit rate than either alone.
+    ggml_set_moe_expert_cache_snapshot_hook(moe_cuda_expert_cache_snapshot);
 }
 
 // ── Stats ───────────────────────────────────────────────────────────────
