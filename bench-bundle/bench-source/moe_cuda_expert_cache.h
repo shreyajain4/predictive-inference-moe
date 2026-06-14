@@ -78,14 +78,19 @@ void moe_cuda_expert_cache_drain(moe_cuda_expert_cache * c);
 
 // Hook function used by ggml-backend.cpp's copy_experts.
 // Tensor name format: "blk.<L>.ffn_<gate|up|down>_exps.weight"
-// On hit, performs D→D from cache slot(s) to (input_cpy_data + dst_offset)
-// using default stream + synchronize, then returns 1. On miss, returns 0.
+// Partial-hit aware: out_uncached_bits is initialized by caller with bits
+// 0..n_experts_in_run-1 set (= "all need PCIe"). For each expert i that the
+// cache satisfies via D→D, this function clears bit i. Returns:
+//   1 = full hit (out_uncached_bits == 0)
+//   2 = partial hit (some bits cleared, others remain)
+//   0 = nothing done (out_uncached_bits unchanged)
 int moe_cuda_expert_cache_try_d2d(
     const char * tensor_name,
     int32_t first_expert_id, int32_t n_experts_in_run,
     void *  input_cpy_data, size_t dst_offset,
     size_t  expert_size,
-    size_t  total_bytes);
+    size_t  total_bytes,
+    uint64_t * out_uncached_bits);
 
 // Hook called by ggml-backend.cpp AFTER a successful PCIe write. Captures
 // the post-conversion bytes into a cache slot (D→D from input_cpy to pool).

@@ -1669,12 +1669,21 @@ static enum ggml_status ggml_backend_sched_compute_splits(ggml_backend_sched_t s
                         // moe-advisor: check expert cache first. If the cache
                         // can satisfy this run via D→D copy, skip PCIe.
                         bool cache_hit = false;
+                        // bit i set = expert (first_id + i) still needs PCIe.
+                        // Initialized to "all need PCIe"; cache hook clears
+                        // bits for experts it satisfied via D→D.
+                        const int32_t n_experts_in_run = last_id - first_id + 1;
+                        uint64_t uncached_bits = n_experts_in_run >= 64
+                            ? ~uint64_t(0)
+                            : ((uint64_t(1) << n_experts_in_run) - 1);
                         if (g_moe_expert_cache_hook && input->name) {
-                            cache_hit = g_moe_expert_cache_hook(
+                            int rc = g_moe_expert_cache_hook(
                                 input->name,
-                                first_id, last_id - first_id + 1,
+                                first_id, n_experts_in_run,
                                 input_cpy->data, expert_offset,
-                                expert_size, total_bytes) == 1;
+                                expert_size, total_bytes, &uncached_bits);
+                            cache_hit = (rc == 1);   // full hit, no PCIe needed
+                            (void)rc;                // rc==2 → partial (handled below)
 
                             // ── MOE-DBG: verify cache-hit bytes match CPU src ──
                             // Since set_tensor_async is byte-identical to host
@@ -1712,21 +1721,51 @@ static enum ggml_status ggml_backend_sched_compute_splits(ggml_backend_sched_t s
                             }
                         }
 
-                        if (!cache_hit) {
-                            ggml_backend_tensor_set_async(split_backend,
-                                input_cpy,
-                                (const uint8_t *)input->data + expert_offset, expert_offset,
-                                // copy a bit extra at the to ensure there are no NaNs in the padding of the last expert
-                                // this is necessary for MMQ in the CUDA backend
-                                total_bytes);
+                        // PCIe the bits that are still set in uncached_bits.
+                        // We coalesce contiguous set bits into one tensor_set_async
+                        // call to keep launch overhead similar to the original
+                        // single-call path when the run is fully uncached.
+                        if (uncached_bits != 0) {
+                            int32_t i = 0;
+                            const int32_t n = n_experts_in_run;
+                            while (i < n) {
+                                if (!((uncached_bits >> i) & 1)) { i++; continue; }
+                                int32_t j = i + 1;
+                                while (j < n && ((uncached_bits >> j) & 1)) { j++; }
+                                // Sub-run [i..j-1] needs PCIe.
+                                const size_t sub_off  = expert_offset + (size_t)i * expert_size;
+                                const size_t sub_len  = (size_t)(j - i) * expert_size;
+                                // Tack the 512-byte MMQ-safety padding onto the LAST
+                                // expert in the FULL run (only when not the last
+                                // expert in the tensor). This matches the original
+                                // single-call padding semantics.
+                                const bool   include_pad = (j == n) && (padding_end > 0);
+                                const size_t pcie_bytes  = include_pad ? sub_len + padding_end : sub_len;
+                                ggml_backend_tensor_set_async(split_backend, input_cpy,
+                                    (const uint8_t *)input->data + sub_off, sub_off, pcie_bytes);
+                                // Snapshot just this sub-run so subsequent uses can cache-hit.
+                                if (g_moe_expert_cache_snapshot && input->name) {
+                                    g_moe_expert_cache_snapshot(input->name,
+                                        first_id + i, j - i,
+                                        input_cpy->data, sub_off, expert_size, pcie_bytes);
+                                }
+                                i = j;
+                            }
+                            // If last expert was a cache hit but padding wasn't covered,
+                            // PCIe just the trailing pad bytes to avoid MMQ NaNs.
+                            if (padding_end > 0 && !((uncached_bits >> (n - 1)) & 1)) {
+                                const size_t pad_off = expert_offset + (size_t)n * expert_size;
+                                ggml_backend_tensor_set_async(split_backend, input_cpy,
+                                    (const uint8_t *)input->data + pad_off, pad_off, padding_end);
+                            }
 
-                            // ── MOE-DEBUG: one-shot byte-dump to verify whether
-                            // tensor_set_async does any format conversion. We dump
-                            // 64 bytes from BOTH the CPU source AND the GPU dest
-                            // (read back via tensor_get). If identical → no conv;
-                            // any prefetch into our pool is correct as-is.
-                            // Controlled by MOE_DEBUG_DUMP_BYTES env var.
-                            {
+                            // ── MOE-DEBUG: one-shot byte-dump (full-miss path only) ──
+                            // Verifies tensor_set_async is byte-identity for Q4_K.
+                            // Only fires when this entire run hit PCIe (no cache D→D
+                            // mixed in), so the dump represents pure ggml PCIe.
+                            if (uncached_bits == ((n_experts_in_run >= 64)
+                                                  ? ~uint64_t(0)
+                                                  : ((uint64_t(1) << n_experts_in_run) - 1))) {
                                 static std::atomic<int> s_dump_done{0};
                                 if (s_dump_done.load(std::memory_order_relaxed) == 0 &&
                                     getenv("MOE_DEBUG_DUMP_BYTES")) {
@@ -1743,26 +1782,15 @@ static enum ggml_status ggml_backend_sched_compute_splits(ggml_backend_sched_t s
                                             input->name ? input->name : "?",
                                             first_id, expert_size, total_bytes);
                                         fprintf(stderr, "[MOE-DBG] CPU src (input->data + %zu): ", expert_offset);
-                                        for (size_t i = 0; i < dump_n; ++i) fprintf(stderr, "%02x ", cpu_buf[i]);
+                                        for (size_t i2 = 0; i2 < dump_n; ++i2) fprintf(stderr, "%02x ", cpu_buf[i2]);
                                         fprintf(stderr, "\n[MOE-DBG] GPU dst (input_cpy   + %zu): ", expert_offset);
-                                        for (size_t i = 0; i < dump_n; ++i) fprintf(stderr, "%02x ", gpu_buf[i]);
+                                        for (size_t i2 = 0; i2 < dump_n; ++i2) fprintf(stderr, "%02x ", gpu_buf[i2]);
                                         int diff = memcmp(cpu_buf, gpu_buf, dump_n);
                                         fprintf(stderr, "\n[MOE-DBG] memcmp=%d  %s\n\n",
                                             diff, diff == 0 ? "(IDENTICAL — no conversion)" : "(DIFFERENT — conversion happens)");
                                         fflush(stderr);
                                     }
                                 }
-                            }
-                            // ── end MOE-DEBUG ──
-
-                            // After PCIe lands the converted bytes in input_cpy,
-                            // give the cache a chance to snapshot them (D→D into
-                            // a GPU pool) so subsequent calls can serve from cache.
-                            if (g_moe_expert_cache_snapshot && input->name) {
-                                g_moe_expert_cache_snapshot(input->name,
-                                    first_id, last_id - first_id + 1,
-                                    input_cpy->data, expert_offset,
-                                    expert_size, total_bytes);
                             }
                         }
                     };

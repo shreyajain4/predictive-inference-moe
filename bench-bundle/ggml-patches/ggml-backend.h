@@ -103,6 +103,19 @@ extern "C" {
     // total_bytes: includes the 512-byte MMQ-safety padding at the end when
     //              not the last expert in the tensor.
     // The hook implementation owns synchronization with the compute stream.
+    //
+    // Partial-hit protocol: the hook MAY write a subset of experts to input_cpy
+    // via D→D. For each cached expert, the hook clears the corresponding bit in
+    // *out_uncached_bits (bit i corresponds to relative expert i, 0-indexed). On
+    // entry, ggml-backend sets bits 0..n_experts_in_run-1 to 1 (meaning "all
+    // need PCIe"). The hook clears bits it satisfied via cache. After the call,
+    // ggml-backend issues per-expert PCIe ONLY for the still-set bits. If n>64,
+    // the hook should return 0 (no partial support for big runs).
+    //
+    // Return value semantics:
+    //   1: full hit (all experts cached; out_uncached_bits == 0 after call)
+    //   2: partial hit (some experts cached; bits remain set for uncached)
+    //   0: no work done (full PCIe fallback; bits unchanged)
     typedef int (*ggml_moe_expert_cache_try_d2d_fn)(
         const char * tensor_name,
         int32_t      first_expert_id,
@@ -110,7 +123,8 @@ extern "C" {
         void *       input_cpy_data,
         size_t       dst_offset,
         size_t       expert_size,
-        size_t       total_bytes);
+        size_t       total_bytes,
+        uint64_t *   out_uncached_bits);
     GGML_API void ggml_set_moe_expert_cache_hook(ggml_moe_expert_cache_try_d2d_fn fn);
 
     // Called AFTER PCIe ggml_backend_tensor_set_async writes input_cpy. The

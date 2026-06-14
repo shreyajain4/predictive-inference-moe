@@ -261,12 +261,16 @@ extern "C" int moe_cuda_expert_cache_try_d2d(
     const char * tensor_name,
     int32_t first_expert_id, int32_t n_experts_in_run,
     void *  input_cpy_data,  size_t dst_offset,
-    size_t  expert_size,     size_t total_bytes)
+    size_t  expert_size,     size_t total_bytes,
+    uint64_t * out_uncached_bits)
 {
+    (void)total_bytes;
     if (!g_cache) return 0;
     if (!tensor_name || !input_cpy_data) return 0;
+    if (n_experts_in_run <= 0 || n_experts_in_run > 64) return 0;  // partial-hit limited to uint64 mask
+    if (!out_uncached_bits) return 0;
 
-    // DEBUG: always fall through to test if d2d itself is the bug
+    // DEBUG override: skip cache entirely.
     if (const char * dbg = getenv("MOE_CACHE_FORCE_FALLTHROUGH")) {
         if (dbg[0] == '1') {
             g_cache->stat_d2d_partial_miss.fetch_add(1, std::memory_order_relaxed);
@@ -280,91 +284,64 @@ extern "C" int moe_cuda_expert_cache_try_d2d(
     moe_cuda_expert_cache * c = g_cache;
     const size_t per_expert = c->expert_size[kind];
 
-    // Safety: if ggml's expert_size differs from what we stored, the
-    // bytes-per-expert in input_cpy don't line up with our slot contents.
-    // Bail out and let PCIe handle it.
+    // If ggml's expert_size disagrees with what we stored when populating
+    // the slot, the bytes won't line up. Bail entirely.
     if (expert_size != per_expert) {
         c->stat_d2d_partial_miss.fetch_add(1, std::memory_order_relaxed);
         return 0;
     }
 
-    // Check ALL experts in the run are cached. If any miss, fall through.
-    std::vector<int> slot_indices((size_t)n_experts_in_run, -1);
+    // Look up every expert; collect slot indices for cached ones.
+    int slot_indices[64];
+    for (int i = 0; i < 64; ++i) slot_indices[i] = -1;
+    int n_cached = 0;
     {
         std::lock_guard<std::mutex> lk(c->mu);
         for (int32_t i = 0; i < n_experts_in_run; ++i) {
             expert_key key{layer, first_expert_id + i, kind};
             auto it = c->index.find(key);
-            if (it == c->index.end()) {
-                c->stat_d2d_partial_miss.fetch_add(1, std::memory_order_relaxed);
-                return 0;   // miss; let copy_experts use PCIe
-            }
+            if (it == c->index.end()) continue;   // bit i remains set in caller's mask
             slot_indices[i] = it->second;
             touch_slot(c, it->second);
+            n_cached++;
         }
     }
 
+    if (n_cached == 0) {
+        c->stat_d2d_partial_miss.fetch_add(1, std::memory_order_relaxed);
+        return 0;
+    }
+
+    // Wait for any in-flight prefetches to land before we D→D from the slots.
     cudaStreamSynchronize(c->prefetch_stream);
 
-    // DEBUG: at first call, dump 16 bytes from cache slot AND from where PCIe
-    // would have written, so we can compare. Only triggers once.
-    static std::atomic<bool> debug_dumped{false};
-    bool expect_dump = false;
-    if (getenv("MOE_CACHE_DEBUG_DUMP") && !debug_dumped.load()) {
-        if (debug_dumped.exchange(true) == false) {
-            expect_dump = true;
-        }
-    }
-
-    // ALSO dump what's in input_cpy BEFORE we overwrite. If PCIe path
-    // converts/reorders Q4_K weights when copying, this would show the
-    // converted form — comparing to our raw cached bytes reveals whether
-    // we need to do the same conversion.
-    if (expect_dump) {
-        uint8_t pre_d2d[16] = {};
-        cudaMemcpy(pre_d2d,
-                   (const uint8_t*)input_cpy_data + dst_offset,
-                   16, cudaMemcpyDeviceToHost);
-        fprintf(stderr, "[CACHE-DUMP] PRE-d2d input_cpy[dst_offset..+16]:");
-        for (int b = 0; b < 16; ++b) fprintf(stderr, " %02x", pre_d2d[b]);
-        fprintf(stderr, "  (this is what PCIe wrote earlier OR is uninitialized)\n");
-    }
-
-    // Stride writes by expert_size (= ggml's nb[2]). Each cached slot holds
-    // per_expert (= expert_size, we just bailed out otherwise) bytes of expert data.
     uint8_t * dst_base = (uint8_t *)input_cpy_data + dst_offset;
-    const size_t experts_bytes = (size_t)n_experts_in_run * expert_size;
+    size_t   bytes_served = 0;
+    uint64_t bits_cleared = 0;
     for (int32_t i = 0; i < n_experts_in_run; ++i) {
+        if (slot_indices[i] < 0) continue;
         const uint8_t * src = c->pool + (size_t)slot_indices[i] * c->slot_size;
         uint8_t *       dst = dst_base + (size_t)i * expert_size;
         CUDA_CHECK(cudaMemcpyAsync(dst, src, expert_size,
                                     cudaMemcpyDeviceToDevice, /*default stream*/ 0));
-        if (expect_dump && i == 0) {
-            uint8_t host_first16[16] = {};
-            cudaMemcpy(host_first16, src, 16, cudaMemcpyDeviceToHost);
-            fprintf(stderr, "[CACHE-DUMP] tensor=%s first_eid=%d kind=%d slot_idx=%d "
-                    "slot_first16:", tensor_name, first_expert_id, kind, slot_indices[i]);
-            for (int b = 0; b < 16; ++b) fprintf(stderr, " %02x", host_first16[b]);
-            fprintf(stderr, "\n");
-            uint8_t host_dst16[16] = {};
-            cudaMemcpy(host_dst16, dst, 16, cudaMemcpyDeviceToHost);
-            fprintf(stderr, "[CACHE-DUMP] post-d2d dst_first16:");
-            for (int b = 0; b < 16; ++b) fprintf(stderr, " %02x", host_dst16[b]);
-            fprintf(stderr, "\n");
-        }
+        bits_cleared |= (uint64_t(1) << i);
+        bytes_served += expert_size;
     }
-    // MMQ padding region — DEBUG: skip it. If output becomes coherent
-    // without writing the padding, the bug was zero-padding biasing routing.
-    // If output is still garbage, the padding isn't the issue.
-    // Use cudaDeviceSynchronize() not cudaStreamSynchronize(0) — under
-    // CUDA 12 per-thread default streams, the default stream we use here
-    // is independent of ggml-cuda's compute stream. We need device-wide
-    // synchronization to make our writes visible to all subsequent reads.
     cudaDeviceSynchronize();
 
-    c->stat_d2d_hits.fetch_add(1, std::memory_order_relaxed);
-    c->stat_bytes_d2d_served.fetch_add((int64_t)experts_bytes, std::memory_order_relaxed);
-    return 1;
+    *out_uncached_bits &= ~bits_cleared;
+    c->stat_bytes_d2d_served.fetch_add((int64_t)bytes_served, std::memory_order_relaxed);
+
+    const bool full = (n_cached == n_experts_in_run);
+    if (full) {
+        c->stat_d2d_hits.fetch_add(1, std::memory_order_relaxed);
+        return 1;
+    } else {
+        // Partial: count this run as a partial-miss for stats purposes, but
+        // we DID save some PCIe.
+        c->stat_d2d_partial_miss.fetch_add(1, std::memory_order_relaxed);
+        return 2;
+    }
 }
 
 // Snapshot post-PCIe bytes from input_cpy into our cache slots (D→D). Called
