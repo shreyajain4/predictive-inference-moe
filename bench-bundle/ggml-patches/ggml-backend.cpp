@@ -1670,7 +1670,7 @@ static enum ggml_status ggml_backend_sched_compute_splits(ggml_backend_sched_t s
                                 input->name,
                                 first_id, last_id - first_id + 1,
                                 input_cpy->data, expert_offset,
-                                total_bytes) == 1;
+                                expert_size, total_bytes) == 1;
                         }
 
                         if (!cache_hit) {

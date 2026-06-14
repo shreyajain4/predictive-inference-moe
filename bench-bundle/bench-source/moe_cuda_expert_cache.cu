@@ -251,7 +251,8 @@ extern "C" void moe_cuda_expert_cache_drain(moe_cuda_expert_cache * c) {
 extern "C" int moe_cuda_expert_cache_try_d2d(
     const char * tensor_name,
     int32_t first_expert_id, int32_t n_experts_in_run,
-    void *  input_cpy_data,  size_t dst_offset, size_t total_bytes)
+    void *  input_cpy_data,  size_t dst_offset,
+    size_t  expert_size,     size_t total_bytes)
 {
     if (!g_cache) return 0;
     if (!tensor_name || !input_cpy_data) return 0;
@@ -270,8 +271,15 @@ extern "C" int moe_cuda_expert_cache_try_d2d(
     moe_cuda_expert_cache * c = g_cache;
     const size_t per_expert = c->expert_size[kind];
 
+    // Safety: if ggml's expert_size differs from what we stored, the
+    // bytes-per-expert in input_cpy don't line up with our slot contents.
+    // Bail out and let PCIe handle it.
+    if (expert_size != per_expert) {
+        c->stat_d2d_partial_miss.fetch_add(1, std::memory_order_relaxed);
+        return 0;
+    }
+
     // Check ALL experts in the run are cached. If any miss, fall through.
-    // Collect slot indices under lock.
     std::vector<int> slot_indices((size_t)n_experts_in_run, -1);
     {
         std::lock_guard<std::mutex> lk(c->mu);
@@ -287,38 +295,29 @@ extern "C" int moe_cuda_expert_cache_try_d2d(
         }
     }
 
-    // Wait for any in-flight prefetches to finish — they may be ours.
-    // (Cheap: only synchronizes the prefetch stream's pending work.)
     cudaStreamSynchronize(c->prefetch_stream);
 
-    // All cached. Issue D→D for each expert from its slot to dst_offset region.
-    // dst layout: dst[dst_offset + i * per_expert] for i in [0..n)
+    // Stride writes by expert_size (= ggml's nb[2]). Each cached slot holds
+    // per_expert (= expert_size, we just bailed out otherwise) bytes of expert data.
     uint8_t * dst_base = (uint8_t *)input_cpy_data + dst_offset;
-    const size_t expert_bytes_total = (size_t)n_experts_in_run * per_expert;
-    size_t bytes_copied = 0;
-    for (int32_t i = 0; i < n_experts_in_run && bytes_copied < expert_bytes_total; ++i) {
+    const size_t experts_bytes = (size_t)n_experts_in_run * expert_size;
+    for (int32_t i = 0; i < n_experts_in_run; ++i) {
         const uint8_t * src = c->pool + (size_t)slot_indices[i] * c->slot_size;
-        CUDA_CHECK(cudaMemcpyAsync(dst_base + bytes_copied, src, per_expert,
+        uint8_t *       dst = dst_base + (size_t)i * expert_size;
+        CUDA_CHECK(cudaMemcpyAsync(dst, src, expert_size,
                                     cudaMemcpyDeviceToDevice, /*default stream*/ 0));
-        bytes_copied += per_expert;
     }
-    // If total_bytes > expert_bytes_total, ggml's copy_experts wanted us to
-    // copy a 512-byte "padding" after the last expert (to prevent MMQ from
-    // reading NaN-shaped bytes in the input_cpy buffer). The original H→D
-    // path copies the next expert's first bytes there; we don't have access
-    // to that expert in the cache, so we memset to zero. This is bit-different
-    // from the PCIe path but should be NaN-safe and not bias routing.
-    if (total_bytes > expert_bytes_total) {
-        const size_t pad_bytes = total_bytes - expert_bytes_total;
-        CUDA_CHECK(cudaMemsetAsync(dst_base + bytes_copied, 0, pad_bytes,
-                                    /*default stream*/ 0));
-        bytes_copied += pad_bytes;
+    // MMQ padding region (the extra 512-byte tail after the last expert when
+    // not at the end of the tensor). PCIe path writes next-expert's first
+    // bytes there; we zero-fill to be NaN-safe.
+    if (total_bytes > experts_bytes) {
+        const size_t pad_bytes = total_bytes - experts_bytes;
+        CUDA_CHECK(cudaMemsetAsync(dst_base + experts_bytes, 0, pad_bytes, 0));
     }
-    // Synchronize so data is visible to the compute stream that reads input_cpy next.
     cudaStreamSynchronize(0);
 
     c->stat_d2d_hits.fetch_add(1, std::memory_order_relaxed);
-    c->stat_bytes_d2d_served.fetch_add((int64_t)bytes_copied, std::memory_order_relaxed);
+    c->stat_bytes_d2d_served.fetch_add((int64_t)experts_bytes, std::memory_order_relaxed);
     return 1;
 }
 

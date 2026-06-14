@@ -76,7 +76,9 @@ void moe_cuda_expert_cache_drain(moe_cuda_expert_cache * c);
 int moe_cuda_expert_cache_try_d2d(
     const char * tensor_name,
     int32_t first_expert_id, int32_t n_experts_in_run,
-    void *  input_cpy_data, size_t dst_offset, size_t total_bytes);
+    void *  input_cpy_data, size_t dst_offset,
+    size_t  expert_size,
+    size_t  total_bytes);
 
 // Install the above as ggml-backend's hook. Call this once after creating the cache.
 void moe_cuda_expert_cache_install_hook(moe_cuda_expert_cache * c);

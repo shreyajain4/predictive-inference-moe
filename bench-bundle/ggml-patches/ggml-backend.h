@@ -97,6 +97,11 @@ extern "C" {
     //
     // tensor_name: the source weight tensor's name (e.g. "blk.5.ffn_gate_exps.weight")
     // input_cpy_data: device pointer of the destination (compute buffer)
+    // expert_size: per-expert stride in bytes (= source tensor's nb[2]); the
+    //              cache must place expert (first_expert_id + i) at offset
+    //              dst_offset + i * expert_size within input_cpy_data.
+    // total_bytes: includes the 512-byte MMQ-safety padding at the end when
+    //              not the last expert in the tensor.
     // The hook implementation owns synchronization with the compute stream.
     typedef int (*ggml_moe_expert_cache_try_d2d_fn)(
         const char * tensor_name,
@@ -104,6 +109,7 @@ extern "C" {
         int32_t      n_experts_in_run,
         void *       input_cpy_data,
         size_t       dst_offset,
+        size_t       expert_size,
         size_t       total_bytes);
     GGML_API void ggml_set_moe_expert_cache_hook(ggml_moe_expert_cache_try_d2d_fn fn);
 
