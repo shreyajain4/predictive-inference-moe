@@ -1684,6 +1684,42 @@ static enum ggml_status ggml_backend_sched_compute_splits(ggml_backend_sched_t s
                                 // copy a bit extra at the to ensure there are no NaNs in the padding of the last expert
                                 // this is necessary for MMQ in the CUDA backend
                                 total_bytes);
+
+                            // ── MOE-DEBUG: one-shot byte-dump to verify whether
+                            // tensor_set_async does any format conversion. We dump
+                            // 64 bytes from BOTH the CPU source AND the GPU dest
+                            // (read back via tensor_get). If identical → no conv;
+                            // any prefetch into our pool is correct as-is.
+                            // Controlled by MOE_DEBUG_DUMP_BYTES env var.
+                            {
+                                static std::atomic<int> s_dump_done{0};
+                                if (s_dump_done.load(std::memory_order_relaxed) == 0 &&
+                                    getenv("MOE_DEBUG_DUMP_BYTES")) {
+                                    int expected = 0;
+                                    if (s_dump_done.compare_exchange_strong(expected, 1)) {
+                                        ggml_backend_synchronize(split_backend);
+                                        const size_t dump_n = std::min<size_t>(64, total_bytes);
+                                        unsigned char gpu_buf[64] = {0};
+                                        ggml_backend_tensor_get(input_cpy,
+                                            gpu_buf, expert_offset, dump_n);
+                                        const unsigned char * cpu_buf =
+                                            (const unsigned char *)input->data + expert_offset;
+                                        fprintf(stderr, "\n[MOE-DBG] tensor=%s first_id=%d expert_size=%zu total_bytes=%zu\n",
+                                            input->name ? input->name : "?",
+                                            first_id, expert_size, total_bytes);
+                                        fprintf(stderr, "[MOE-DBG] CPU src (input->data + %zu): ", expert_offset);
+                                        for (size_t i = 0; i < dump_n; ++i) fprintf(stderr, "%02x ", cpu_buf[i]);
+                                        fprintf(stderr, "\n[MOE-DBG] GPU dst (input_cpy   + %zu): ", expert_offset);
+                                        for (size_t i = 0; i < dump_n; ++i) fprintf(stderr, "%02x ", gpu_buf[i]);
+                                        int diff = memcmp(cpu_buf, gpu_buf, dump_n);
+                                        fprintf(stderr, "\n[MOE-DBG] memcmp=%d  %s\n\n",
+                                            diff, diff == 0 ? "(IDENTICAL — no conversion)" : "(DIFFERENT — conversion happens)");
+                                        fflush(stderr);
+                                    }
+                                }
+                            }
+                            // ── end MOE-DEBUG ──
+
                             // After PCIe lands the converted bytes in input_cpy,
                             // give the cache a chance to snapshot them (D→D into
                             // a GPU pool) so subsequent calls can serve from cache.
