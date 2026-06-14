@@ -297,6 +297,16 @@ extern "C" int moe_cuda_expert_cache_try_d2d(
 
     cudaStreamSynchronize(c->prefetch_stream);
 
+    // DEBUG: at first call, dump 16 bytes from cache slot AND from where PCIe
+    // would have written, so we can compare. Only triggers once.
+    static std::atomic<bool> debug_dumped{false};
+    bool expect_dump = false;
+    if (getenv("MOE_CACHE_DEBUG_DUMP") && !debug_dumped.load()) {
+        if (debug_dumped.exchange(true) == false) {
+            expect_dump = true;
+        }
+    }
+
     // Stride writes by expert_size (= ggml's nb[2]). Each cached slot holds
     // per_expert (= expert_size, we just bailed out otherwise) bytes of expert data.
     uint8_t * dst_base = (uint8_t *)input_cpy_data + dst_offset;
@@ -306,6 +316,19 @@ extern "C" int moe_cuda_expert_cache_try_d2d(
         uint8_t *       dst = dst_base + (size_t)i * expert_size;
         CUDA_CHECK(cudaMemcpyAsync(dst, src, expert_size,
                                     cudaMemcpyDeviceToDevice, /*default stream*/ 0));
+        if (expect_dump && i == 0) {
+            uint8_t host_first16[16] = {};
+            cudaMemcpy(host_first16, src, 16, cudaMemcpyDeviceToHost);
+            fprintf(stderr, "[CACHE-DUMP] tensor=%s first_eid=%d kind=%d slot_idx=%d "
+                    "slot_first16:", tensor_name, first_expert_id, kind, slot_indices[i]);
+            for (int b = 0; b < 16; ++b) fprintf(stderr, " %02x", host_first16[b]);
+            fprintf(stderr, "\n");
+            uint8_t host_dst16[16] = {};
+            cudaMemcpy(host_dst16, dst, 16, cudaMemcpyDeviceToHost);
+            fprintf(stderr, "[CACHE-DUMP] post-d2d dst_first16:");
+            for (int b = 0; b < 16; ++b) fprintf(stderr, " %02x", host_dst16[b]);
+            fprintf(stderr, "\n");
+        }
     }
     // MMQ padding region (the extra 512-byte tail after the last expert when
     // not at the end of the tensor). PCIe path writes next-expert's first
