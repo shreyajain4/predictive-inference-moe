@@ -1,0 +1,1736 @@
+{
+  "gguf_path": "/Users/shreyajain/llama.cpp/models/Qwen3-30B-A3B-Instruct-2507-Q8_0.gguf",
+  "tensor_data_start": 5969920,
+  "num_layers": 48,
+  "num_experts": 128,
+  "layers": [
+    {
+      "layer": 0,
+      "down": {
+        "base_offset": 693236736,
+        "per_expert_bytes": 1671168,
+        "total_bytes": 213909504,
+        "dtype": "Q8_0",
+        "shape": [
+          768,
+          2048,
+          128
+        ]
+      },
+      "gate": {
+        "base_offset": 907146240,
+        "per_expert_bytes": 1671168,
+        "total_bytes": 213909504,
+        "dtype": "Q8_0",
+        "shape": [
+          2048,
+          768,
+          128
+        ]
+      },
+      "up": {
+        "base_offset": 1122112512,
+        "per_expert_bytes": 1671168,
+        "total_bytes": 213909504,
+        "dtype": "Q8_0",
+        "shape": [
+          2048,
+          768,
+          128
+        ]
+      }
+    },
+    {
+      "layer": 1,
+      "down": {
+        "base_offset": 1356085248,
+        "per_expert_bytes": 1671168,
+        "total_bytes": 213909504,
+        "dtype": "Q8_0",
+        "shape": [
+          768,
+          2048,
+          128
+        ]
+      },
+      "gate": {
+        "base_offset": 1569994752,
+        "per_expert_bytes": 1671168,
+        "total_bytes": 213909504,
+        "dtype": "Q8_0",
+        "shape": [
+          2048,
+          768,
+          128
+        ]
+      },
+      "up": {
+        "base_offset": 1784961024,
+        "per_expert_bytes": 1671168,
+        "total_bytes": 213909504,
+        "dtype": "Q8_0",
+        "shape": [
+          2048,
+          768,
+          128
+        ]
+      }
+    },
+    {
+      "layer": 2,
+      "down": {
+        "base_offset": 2018933760,
+        "per_expert_bytes": 1671168,
+        "total_bytes": 213909504,
+        "dtype": "Q8_0",
+        "shape": [
+          768,
+          2048,
+          128
+        ]
+      },
+      "gate": {
+        "base_offset": 2232843264,
+        "per_expert_bytes": 1671168,
+        "total_bytes": 213909504,
+        "dtype": "Q8_0",
+        "shape": [
+          2048,
+          768,
+          128
+        ]
+      },
+      "up": {
+        "base_offset": 2447809536,
+        "per_expert_bytes": 1671168,
+        "total_bytes": 213909504,
+        "dtype": "Q8_0",
+        "shape": [
+          2048,
+          768,
+          128
+        ]
+      }
+    },
+    {
+      "layer": 3,
+      "down": {
+        "base_offset": 2681782272,
+        "per_expert_bytes": 1671168,
+        "total_bytes": 213909504,
+        "dtype": "Q8_0",
+        "shape": [
+          768,
+          2048,
+          128
+        ]
+      },
+      "gate": {
+        "base_offset": 2895691776,
+        "per_expert_bytes": 1671168,
+        "total_bytes": 213909504,
+        "dtype": "Q8_0",
+        "shape": [
+          2048,
+          768,
+          128
+        ]
+      },
+      "up": {
+        "base_offset": 3110658048,
+        "per_expert_bytes": 1671168,
+        "total_bytes": 213909504,
+        "dtype": "Q8_0",
+        "shape": [
+          2048,
+          768,
+          128
+        ]
+      }
+    },
+    {
+      "layer": 4,
+      "down": {
+        "base_offset": 3344630784,
+        "per_expert_bytes": 1671168,
+        "total_bytes": 213909504,
+        "dtype": "Q8_0",
+        "shape": [
+          768,
+          2048,
+          128
+        ]
+      },
+      "gate": {
+        "base_offset": 3558540288,
+        "per_expert_bytes": 1671168,
+        "total_bytes": 213909504,
+        "dtype": "Q8_0",
+        "shape": [
+          2048,
+          768,
+          128
+        ]
+      },
+      "up": {
+        "base_offset": 3773506560,
+        "per_expert_bytes": 1671168,
+        "total_bytes": 213909504,
+        "dtype": "Q8_0",
+        "shape": [
+          2048,
+          768,
+          128
+        ]
+      }
+    },
+    {
+      "layer": 5,
+      "down": {
+        "base_offset": 4007479296,
+        "per_expert_bytes": 1671168,
+        "total_bytes": 213909504,
+        "dtype": "Q8_0",
+        "shape": [
+          768,
+          2048,
+          128
+        ]
+      },
+      "gate": {
+        "base_offset": 4221388800,
+        "per_expert_bytes": 1671168,
+        "total_bytes": 213909504,
+        "dtype": "Q8_0",
+        "shape": [
+          2048,
+          768,
+          128
+        ]
+      },
+      "up": {
+        "base_offset": 4436355072,
+        "per_expert_bytes": 1671168,
+        "total_bytes": 213909504,
+        "dtype": "Q8_0",
+        "shape": [
+          2048,
+          768,
+          128
+        ]
+      }
+    },
+    {
+      "layer": 6,
+      "down": {
+        "base_offset": 4670327808,
+        "per_expert_bytes": 1671168,
+        "total_bytes": 213909504,
+        "dtype": "Q8_0",
+        "shape": [
+          768,
+          2048,
+          128
+        ]
+      },
+      "gate": {
+        "base_offset": 4884237312,
+        "per_expert_bytes": 1671168,
+        "total_bytes": 213909504,
+        "dtype": "Q8_0",
+        "shape": [
+          2048,
+          768,
+          128
+        ]
+      },
+      "up": {
+        "base_offset": 5099203584,
+        "per_expert_bytes": 1671168,
+        "total_bytes": 213909504,
+        "dtype": "Q8_0",
+        "shape": [
+          2048,
+          768,
+          128
+        ]
+      }
+    },
+    {
+      "layer": 7,
+      "down": {
+        "base_offset": 5333176320,
+        "per_expert_bytes": 1671168,
+        "total_bytes": 213909504,
+        "dtype": "Q8_0",
+        "shape": [
+          768,
+          2048,
+          128
+        ]
+      },
+      "gate": {
+        "base_offset": 5547085824,
+        "per_expert_bytes": 1671168,
+        "total_bytes": 213909504,
+        "dtype": "Q8_0",
+        "shape": [
+          2048,
+          768,
+          128
+        ]
+      },
+      "up": {
+        "base_offset": 5762052096,
+        "per_expert_bytes": 1671168,
+        "total_bytes": 213909504,
+        "dtype": "Q8_0",
+        "shape": [
+          2048,
+          768,
+          128
+        ]
+      }
+    },
+    {
+      "layer": 8,
+      "down": {
+        "base_offset": 5996024832,
+        "per_expert_bytes": 1671168,
+        "total_bytes": 213909504,
+        "dtype": "Q8_0",
+        "shape": [
+          768,
+          2048,
+          128
+        ]
+      },
+      "gate": {
+        "base_offset": 6209934336,
+        "per_expert_bytes": 1671168,
+        "total_bytes": 213909504,
+        "dtype": "Q8_0",
+        "shape": [
+          2048,
+          768,
+          128
+        ]
+      },
+      "up": {
+        "base_offset": 6424900608,
+        "per_expert_bytes": 1671168,
+        "total_bytes": 213909504,
+        "dtype": "Q8_0",
+        "shape": [
+          2048,
+          768,
+          128
+        ]
+      }
+    },
+    {
+      "layer": 9,
+      "down": {
+        "base_offset": 6658873344,
+        "per_expert_bytes": 1671168,
+        "total_bytes": 213909504,
+        "dtype": "Q8_0",
+        "shape": [
+          768,
+          2048,
+          128
+        ]
+      },
+      "gate": {
+        "base_offset": 6872782848,
+        "per_expert_bytes": 1671168,
+        "total_bytes": 213909504,
+        "dtype": "Q8_0",
+        "shape": [
+          2048,
+          768,
+          128
+        ]
+      },
+      "up": {
+        "base_offset": 7087749120,
+        "per_expert_bytes": 1671168,
+        "total_bytes": 213909504,
+        "dtype": "Q8_0",
+        "shape": [
+          2048,
+          768,
+          128
+        ]
+      }
+    },
+    {
+      "layer": 10,
+      "down": {
+        "base_offset": 7321721856,
+        "per_expert_bytes": 1671168,
+        "total_bytes": 213909504,
+        "dtype": "Q8_0",
+        "shape": [
+          768,
+          2048,
+          128
+        ]
+      },
+      "gate": {
+        "base_offset": 7535631360,
+        "per_expert_bytes": 1671168,
+        "total_bytes": 213909504,
+        "dtype": "Q8_0",
+        "shape": [
+          2048,
+          768,
+          128
+        ]
+      },
+      "up": {
+        "base_offset": 7750597632,
+        "per_expert_bytes": 1671168,
+        "total_bytes": 213909504,
+        "dtype": "Q8_0",
+        "shape": [
+          2048,
+          768,
+          128
+        ]
+      }
+    },
+    {
+      "layer": 11,
+      "down": {
+        "base_offset": 7984570368,
+        "per_expert_bytes": 1671168,
+        "total_bytes": 213909504,
+        "dtype": "Q8_0",
+        "shape": [
+          768,
+          2048,
+          128
+        ]
+      },
+      "gate": {
+        "base_offset": 8198479872,
+        "per_expert_bytes": 1671168,
+        "total_bytes": 213909504,
+        "dtype": "Q8_0",
+        "shape": [
+          2048,
+          768,
+          128
+        ]
+      },
+      "up": {
+        "base_offset": 8413446144,
+        "per_expert_bytes": 1671168,
+        "total_bytes": 213909504,
+        "dtype": "Q8_0",
+        "shape": [
+          2048,
+          768,
+          128
+        ]
+      }
+    },
+    {
+      "layer": 12,
+      "down": {
+        "base_offset": 8647418880,
+        "per_expert_bytes": 1671168,
+        "total_bytes": 213909504,
+        "dtype": "Q8_0",
+        "shape": [
+          768,
+          2048,
+          128
+        ]
+      },
+      "gate": {
+        "base_offset": 8861328384,
+        "per_expert_bytes": 1671168,
+        "total_bytes": 213909504,
+        "dtype": "Q8_0",
+        "shape": [
+          2048,
+          768,
+          128
+        ]
+      },
+      "up": {
+        "base_offset": 9076294656,
+        "per_expert_bytes": 1671168,
+        "total_bytes": 213909504,
+        "dtype": "Q8_0",
+        "shape": [
+          2048,
+          768,
+          128
+        ]
+      }
+    },
+    {
+      "layer": 13,
+      "down": {
+        "base_offset": 9310267392,
+        "per_expert_bytes": 1671168,
+        "total_bytes": 213909504,
+        "dtype": "Q8_0",
+        "shape": [
+          768,
+          2048,
+          128
+        ]
+      },
+      "gate": {
+        "base_offset": 9524176896,
+        "per_expert_bytes": 1671168,
+        "total_bytes": 213909504,
+        "dtype": "Q8_0",
+        "shape": [
+          2048,
+          768,
+          128
+        ]
+      },
+      "up": {
+        "base_offset": 9739143168,
+        "per_expert_bytes": 1671168,
+        "total_bytes": 213909504,
+        "dtype": "Q8_0",
+        "shape": [
+          2048,
+          768,
+          128
+        ]
+      }
+    },
+    {
+      "layer": 14,
+      "down": {
+        "base_offset": 9973115904,
+        "per_expert_bytes": 1671168,
+        "total_bytes": 213909504,
+        "dtype": "Q8_0",
+        "shape": [
+          768,
+          2048,
+          128
+        ]
+      },
+      "gate": {
+        "base_offset": 10187025408,
+        "per_expert_bytes": 1671168,
+        "total_bytes": 213909504,
+        "dtype": "Q8_0",
+        "shape": [
+          2048,
+          768,
+          128
+        ]
+      },
+      "up": {
+        "base_offset": 10401991680,
+        "per_expert_bytes": 1671168,
+        "total_bytes": 213909504,
+        "dtype": "Q8_0",
+        "shape": [
+          2048,
+          768,
+          128
+        ]
+      }
+    },
+    {
+      "layer": 15,
+      "down": {
+        "base_offset": 10635964416,
+        "per_expert_bytes": 1671168,
+        "total_bytes": 213909504,
+        "dtype": "Q8_0",
+        "shape": [
+          768,
+          2048,
+          128
+        ]
+      },
+      "gate": {
+        "base_offset": 10849873920,
+        "per_expert_bytes": 1671168,
+        "total_bytes": 213909504,
+        "dtype": "Q8_0",
+        "shape": [
+          2048,
+          768,
+          128
+        ]
+      },
+      "up": {
+        "base_offset": 11064840192,
+        "per_expert_bytes": 1671168,
+        "total_bytes": 213909504,
+        "dtype": "Q8_0",
+        "shape": [
+          2048,
+          768,
+          128
+        ]
+      }
+    },
+    {
+      "layer": 16,
+      "down": {
+        "base_offset": 11298812928,
+        "per_expert_bytes": 1671168,
+        "total_bytes": 213909504,
+        "dtype": "Q8_0",
+        "shape": [
+          768,
+          2048,
+          128
+        ]
+      },
+      "gate": {
+        "base_offset": 11512722432,
+        "per_expert_bytes": 1671168,
+        "total_bytes": 213909504,
+        "dtype": "Q8_0",
+        "shape": [
+          2048,
+          768,
+          128
+        ]
+      },
+      "up": {
+        "base_offset": 11727688704,
+        "per_expert_bytes": 1671168,
+        "total_bytes": 213909504,
+        "dtype": "Q8_0",
+        "shape": [
+          2048,
+          768,
+          128
+        ]
+      }
+    },
+    {
+      "layer": 17,
+      "down": {
+        "base_offset": 11961661440,
+        "per_expert_bytes": 1671168,
+        "total_bytes": 213909504,
+        "dtype": "Q8_0",
+        "shape": [
+          768,
+          2048,
+          128
+        ]
+      },
+      "gate": {
+        "base_offset": 12175570944,
+        "per_expert_bytes": 1671168,
+        "total_bytes": 213909504,
+        "dtype": "Q8_0",
+        "shape": [
+          2048,
+          768,
+          128
+        ]
+      },
+      "up": {
+        "base_offset": 12390537216,
+        "per_expert_bytes": 1671168,
+        "total_bytes": 213909504,
+        "dtype": "Q8_0",
+        "shape": [
+          2048,
+          768,
+          128
+        ]
+      }
+    },
+    {
+      "layer": 18,
+      "down": {
+        "base_offset": 12624509952,
+        "per_expert_bytes": 1671168,
+        "total_bytes": 213909504,
+        "dtype": "Q8_0",
+        "shape": [
+          768,
+          2048,
+          128
+        ]
+      },
+      "gate": {
+        "base_offset": 12838419456,
+        "per_expert_bytes": 1671168,
+        "total_bytes": 213909504,
+        "dtype": "Q8_0",
+        "shape": [
+          2048,
+          768,
+          128
+        ]
+      },
+      "up": {
+        "base_offset": 13053385728,
+        "per_expert_bytes": 1671168,
+        "total_bytes": 213909504,
+        "dtype": "Q8_0",
+        "shape": [
+          2048,
+          768,
+          128
+        ]
+      }
+    },
+    {
+      "layer": 19,
+      "down": {
+        "base_offset": 13287358464,
+        "per_expert_bytes": 1671168,
+        "total_bytes": 213909504,
+        "dtype": "Q8_0",
+        "shape": [
+          768,
+          2048,
+          128
+        ]
+      },
+      "gate": {
+        "base_offset": 13501267968,
+        "per_expert_bytes": 1671168,
+        "total_bytes": 213909504,
+        "dtype": "Q8_0",
+        "shape": [
+          2048,
+          768,
+          128
+        ]
+      },
+      "up": {
+        "base_offset": 13716234240,
+        "per_expert_bytes": 1671168,
+        "total_bytes": 213909504,
+        "dtype": "Q8_0",
+        "shape": [
+          2048,
+          768,
+          128
+        ]
+      }
+    },
+    {
+      "layer": 20,
+      "down": {
+        "base_offset": 13950206976,
+        "per_expert_bytes": 1671168,
+        "total_bytes": 213909504,
+        "dtype": "Q8_0",
+        "shape": [
+          768,
+          2048,
+          128
+        ]
+      },
+      "gate": {
+        "base_offset": 14164116480,
+        "per_expert_bytes": 1671168,
+        "total_bytes": 213909504,
+        "dtype": "Q8_0",
+        "shape": [
+          2048,
+          768,
+          128
+        ]
+      },
+      "up": {
+        "base_offset": 14379082752,
+        "per_expert_bytes": 1671168,
+        "total_bytes": 213909504,
+        "dtype": "Q8_0",
+        "shape": [
+          2048,
+          768,
+          128
+        ]
+      }
+    },
+    {
+      "layer": 21,
+      "down": {
+        "base_offset": 14613055488,
+        "per_expert_bytes": 1671168,
+        "total_bytes": 213909504,
+        "dtype": "Q8_0",
+        "shape": [
+          768,
+          2048,
+          128
+        ]
+      },
+      "gate": {
+        "base_offset": 14826964992,
+        "per_expert_bytes": 1671168,
+        "total_bytes": 213909504,
+        "dtype": "Q8_0",
+        "shape": [
+          2048,
+          768,
+          128
+        ]
+      },
+      "up": {
+        "base_offset": 15041931264,
+        "per_expert_bytes": 1671168,
+        "total_bytes": 213909504,
+        "dtype": "Q8_0",
+        "shape": [
+          2048,
+          768,
+          128
+        ]
+      }
+    },
+    {
+      "layer": 22,
+      "down": {
+        "base_offset": 15275904000,
+        "per_expert_bytes": 1671168,
+        "total_bytes": 213909504,
+        "dtype": "Q8_0",
+        "shape": [
+          768,
+          2048,
+          128
+        ]
+      },
+      "gate": {
+        "base_offset": 15489813504,
+        "per_expert_bytes": 1671168,
+        "total_bytes": 213909504,
+        "dtype": "Q8_0",
+        "shape": [
+          2048,
+          768,
+          128
+        ]
+      },
+      "up": {
+        "base_offset": 15704779776,
+        "per_expert_bytes": 1671168,
+        "total_bytes": 213909504,
+        "dtype": "Q8_0",
+        "shape": [
+          2048,
+          768,
+          128
+        ]
+      }
+    },
+    {
+      "layer": 23,
+      "down": {
+        "base_offset": 15938752512,
+        "per_expert_bytes": 1671168,
+        "total_bytes": 213909504,
+        "dtype": "Q8_0",
+        "shape": [
+          768,
+          2048,
+          128
+        ]
+      },
+      "gate": {
+        "base_offset": 16152662016,
+        "per_expert_bytes": 1671168,
+        "total_bytes": 213909504,
+        "dtype": "Q8_0",
+        "shape": [
+          2048,
+          768,
+          128
+        ]
+      },
+      "up": {
+        "base_offset": 16367628288,
+        "per_expert_bytes": 1671168,
+        "total_bytes": 213909504,
+        "dtype": "Q8_0",
+        "shape": [
+          2048,
+          768,
+          128
+        ]
+      }
+    },
+    {
+      "layer": 24,
+      "down": {
+        "base_offset": 16601601024,
+        "per_expert_bytes": 1671168,
+        "total_bytes": 213909504,
+        "dtype": "Q8_0",
+        "shape": [
+          768,
+          2048,
+          128
+        ]
+      },
+      "gate": {
+        "base_offset": 16815510528,
+        "per_expert_bytes": 1671168,
+        "total_bytes": 213909504,
+        "dtype": "Q8_0",
+        "shape": [
+          2048,
+          768,
+          128
+        ]
+      },
+      "up": {
+        "base_offset": 17030476800,
+        "per_expert_bytes": 1671168,
+        "total_bytes": 213909504,
+        "dtype": "Q8_0",
+        "shape": [
+          2048,
+          768,
+          128
+        ]
+      }
+    },
+    {
+      "layer": 25,
+      "down": {
+        "base_offset": 17264449536,
+        "per_expert_bytes": 1671168,
+        "total_bytes": 213909504,
+        "dtype": "Q8_0",
+        "shape": [
+          768,
+          2048,
+          128
+        ]
+      },
+      "gate": {
+        "base_offset": 17478359040,
+        "per_expert_bytes": 1671168,
+        "total_bytes": 213909504,
+        "dtype": "Q8_0",
+        "shape": [
+          2048,
+          768,
+          128
+        ]
+      },
+      "up": {
+        "base_offset": 17693325312,
+        "per_expert_bytes": 1671168,
+        "total_bytes": 213909504,
+        "dtype": "Q8_0",
+        "shape": [
+          2048,
+          768,
+          128
+        ]
+      }
+    },
+    {
+      "layer": 26,
+      "down": {
+        "base_offset": 17927298048,
+        "per_expert_bytes": 1671168,
+        "total_bytes": 213909504,
+        "dtype": "Q8_0",
+        "shape": [
+          768,
+          2048,
+          128
+        ]
+      },
+      "gate": {
+        "base_offset": 18141207552,
+        "per_expert_bytes": 1671168,
+        "total_bytes": 213909504,
+        "dtype": "Q8_0",
+        "shape": [
+          2048,
+          768,
+          128
+        ]
+      },
+      "up": {
+        "base_offset": 18356173824,
+        "per_expert_bytes": 1671168,
+        "total_bytes": 213909504,
+        "dtype": "Q8_0",
+        "shape": [
+          2048,
+          768,
+          128
+        ]
+      }
+    },
+    {
+      "layer": 27,
+      "down": {
+        "base_offset": 18590146560,
+        "per_expert_bytes": 1671168,
+        "total_bytes": 213909504,
+        "dtype": "Q8_0",
+        "shape": [
+          768,
+          2048,
+          128
+        ]
+      },
+      "gate": {
+        "base_offset": 18804056064,
+        "per_expert_bytes": 1671168,
+        "total_bytes": 213909504,
+        "dtype": "Q8_0",
+        "shape": [
+          2048,
+          768,
+          128
+        ]
+      },
+      "up": {
+        "base_offset": 19019022336,
+        "per_expert_bytes": 1671168,
+        "total_bytes": 213909504,
+        "dtype": "Q8_0",
+        "shape": [
+          2048,
+          768,
+          128
+        ]
+      }
+    },
+    {
+      "layer": 28,
+      "down": {
+        "base_offset": 19252995072,
+        "per_expert_bytes": 1671168,
+        "total_bytes": 213909504,
+        "dtype": "Q8_0",
+        "shape": [
+          768,
+          2048,
+          128
+        ]
+      },
+      "gate": {
+        "base_offset": 19466904576,
+        "per_expert_bytes": 1671168,
+        "total_bytes": 213909504,
+        "dtype": "Q8_0",
+        "shape": [
+          2048,
+          768,
+          128
+        ]
+      },
+      "up": {
+        "base_offset": 19681870848,
+        "per_expert_bytes": 1671168,
+        "total_bytes": 213909504,
+        "dtype": "Q8_0",
+        "shape": [
+          2048,
+          768,
+          128
+        ]
+      }
+    },
+    {
+      "layer": 29,
+      "down": {
+        "base_offset": 19915843584,
+        "per_expert_bytes": 1671168,
+        "total_bytes": 213909504,
+        "dtype": "Q8_0",
+        "shape": [
+          768,
+          2048,
+          128
+        ]
+      },
+      "gate": {
+        "base_offset": 20129753088,
+        "per_expert_bytes": 1671168,
+        "total_bytes": 213909504,
+        "dtype": "Q8_0",
+        "shape": [
+          2048,
+          768,
+          128
+        ]
+      },
+      "up": {
+        "base_offset": 20344719360,
+        "per_expert_bytes": 1671168,
+        "total_bytes": 213909504,
+        "dtype": "Q8_0",
+        "shape": [
+          2048,
+          768,
+          128
+        ]
+      }
+    },
+    {
+      "layer": 30,
+      "down": {
+        "base_offset": 20578692096,
+        "per_expert_bytes": 1671168,
+        "total_bytes": 213909504,
+        "dtype": "Q8_0",
+        "shape": [
+          768,
+          2048,
+          128
+        ]
+      },
+      "gate": {
+        "base_offset": 20792601600,
+        "per_expert_bytes": 1671168,
+        "total_bytes": 213909504,
+        "dtype": "Q8_0",
+        "shape": [
+          2048,
+          768,
+          128
+        ]
+      },
+      "up": {
+        "base_offset": 21007567872,
+        "per_expert_bytes": 1671168,
+        "total_bytes": 213909504,
+        "dtype": "Q8_0",
+        "shape": [
+          2048,
+          768,
+          128
+        ]
+      }
+    },
+    {
+      "layer": 31,
+      "down": {
+        "base_offset": 21241540608,
+        "per_expert_bytes": 1671168,
+        "total_bytes": 213909504,
+        "dtype": "Q8_0",
+        "shape": [
+          768,
+          2048,
+          128
+        ]
+      },
+      "gate": {
+        "base_offset": 21455450112,
+        "per_expert_bytes": 1671168,
+        "total_bytes": 213909504,
+        "dtype": "Q8_0",
+        "shape": [
+          2048,
+          768,
+          128
+        ]
+      },
+      "up": {
+        "base_offset": 21670416384,
+        "per_expert_bytes": 1671168,
+        "total_bytes": 213909504,
+        "dtype": "Q8_0",
+        "shape": [
+          2048,
+          768,
+          128
+        ]
+      }
+    },
+    {
+      "layer": 32,
+      "down": {
+        "base_offset": 21904389120,
+        "per_expert_bytes": 1671168,
+        "total_bytes": 213909504,
+        "dtype": "Q8_0",
+        "shape": [
+          768,
+          2048,
+          128
+        ]
+      },
+      "gate": {
+        "base_offset": 22118298624,
+        "per_expert_bytes": 1671168,
+        "total_bytes": 213909504,
+        "dtype": "Q8_0",
+        "shape": [
+          2048,
+          768,
+          128
+        ]
+      },
+      "up": {
+        "base_offset": 22333264896,
+        "per_expert_bytes": 1671168,
+        "total_bytes": 213909504,
+        "dtype": "Q8_0",
+        "shape": [
+          2048,
+          768,
+          128
+        ]
+      }
+    },
+    {
+      "layer": 33,
+      "down": {
+        "base_offset": 22567237632,
+        "per_expert_bytes": 1671168,
+        "total_bytes": 213909504,
+        "dtype": "Q8_0",
+        "shape": [
+          768,
+          2048,
+          128
+        ]
+      },
+      "gate": {
+        "base_offset": 22781147136,
+        "per_expert_bytes": 1671168,
+        "total_bytes": 213909504,
+        "dtype": "Q8_0",
+        "shape": [
+          2048,
+          768,
+          128
+        ]
+      },
+      "up": {
+        "base_offset": 22996113408,
+        "per_expert_bytes": 1671168,
+        "total_bytes": 213909504,
+        "dtype": "Q8_0",
+        "shape": [
+          2048,
+          768,
+          128
+        ]
+      }
+    },
+    {
+      "layer": 34,
+      "down": {
+        "base_offset": 23230086144,
+        "per_expert_bytes": 1671168,
+        "total_bytes": 213909504,
+        "dtype": "Q8_0",
+        "shape": [
+          768,
+          2048,
+          128
+        ]
+      },
+      "gate": {
+        "base_offset": 23443995648,
+        "per_expert_bytes": 1671168,
+        "total_bytes": 213909504,
+        "dtype": "Q8_0",
+        "shape": [
+          2048,
+          768,
+          128
+        ]
+      },
+      "up": {
+        "base_offset": 23658961920,
+        "per_expert_bytes": 1671168,
+        "total_bytes": 213909504,
+        "dtype": "Q8_0",
+        "shape": [
+          2048,
+          768,
+          128
+        ]
+      }
+    },
+    {
+      "layer": 35,
+      "down": {
+        "base_offset": 23892934656,
+        "per_expert_bytes": 1671168,
+        "total_bytes": 213909504,
+        "dtype": "Q8_0",
+        "shape": [
+          768,
+          2048,
+          128
+        ]
+      },
+      "gate": {
+        "base_offset": 24106844160,
+        "per_expert_bytes": 1671168,
+        "total_bytes": 213909504,
+        "dtype": "Q8_0",
+        "shape": [
+          2048,
+          768,
+          128
+        ]
+      },
+      "up": {
+        "base_offset": 24321810432,
+        "per_expert_bytes": 1671168,
+        "total_bytes": 213909504,
+        "dtype": "Q8_0",
+        "shape": [
+          2048,
+          768,
+          128
+        ]
+      }
+    },
+    {
+      "layer": 36,
+      "down": {
+        "base_offset": 24555783168,
+        "per_expert_bytes": 1671168,
+        "total_bytes": 213909504,
+        "dtype": "Q8_0",
+        "shape": [
+          768,
+          2048,
+          128
+        ]
+      },
+      "gate": {
+        "base_offset": 24769692672,
+        "per_expert_bytes": 1671168,
+        "total_bytes": 213909504,
+        "dtype": "Q8_0",
+        "shape": [
+          2048,
+          768,
+          128
+        ]
+      },
+      "up": {
+        "base_offset": 24984658944,
+        "per_expert_bytes": 1671168,
+        "total_bytes": 213909504,
+        "dtype": "Q8_0",
+        "shape": [
+          2048,
+          768,
+          128
+        ]
+      }
+    },
+    {
+      "layer": 37,
+      "down": {
+        "base_offset": 25218631680,
+        "per_expert_bytes": 1671168,
+        "total_bytes": 213909504,
+        "dtype": "Q8_0",
+        "shape": [
+          768,
+          2048,
+          128
+        ]
+      },
+      "gate": {
+        "base_offset": 25432541184,
+        "per_expert_bytes": 1671168,
+        "total_bytes": 213909504,
+        "dtype": "Q8_0",
+        "shape": [
+          2048,
+          768,
+          128
+        ]
+      },
+      "up": {
+        "base_offset": 25647507456,
+        "per_expert_bytes": 1671168,
+        "total_bytes": 213909504,
+        "dtype": "Q8_0",
+        "shape": [
+          2048,
+          768,
+          128
+        ]
+      }
+    },
+    {
+      "layer": 38,
+      "down": {
+        "base_offset": 25881480192,
+        "per_expert_bytes": 1671168,
+        "total_bytes": 213909504,
+        "dtype": "Q8_0",
+        "shape": [
+          768,
+          2048,
+          128
+        ]
+      },
+      "gate": {
+        "base_offset": 26095389696,
+        "per_expert_bytes": 1671168,
+        "total_bytes": 213909504,
+        "dtype": "Q8_0",
+        "shape": [
+          2048,
+          768,
+          128
+        ]
+      },
+      "up": {
+        "base_offset": 26310355968,
+        "per_expert_bytes": 1671168,
+        "total_bytes": 213909504,
+        "dtype": "Q8_0",
+        "shape": [
+          2048,
+          768,
+          128
+        ]
+      }
+    },
+    {
+      "layer": 39,
+      "down": {
+        "base_offset": 26544328704,
+        "per_expert_bytes": 1671168,
+        "total_bytes": 213909504,
+        "dtype": "Q8_0",
+        "shape": [
+          768,
+          2048,
+          128
+        ]
+      },
+      "gate": {
+        "base_offset": 26758238208,
+        "per_expert_bytes": 1671168,
+        "total_bytes": 213909504,
+        "dtype": "Q8_0",
+        "shape": [
+          2048,
+          768,
+          128
+        ]
+      },
+      "up": {
+        "base_offset": 26973204480,
+        "per_expert_bytes": 1671168,
+        "total_bytes": 213909504,
+        "dtype": "Q8_0",
+        "shape": [
+          2048,
+          768,
+          128
+        ]
+      }
+    },
+    {
+      "layer": 40,
+      "down": {
+        "base_offset": 27207177216,
+        "per_expert_bytes": 1671168,
+        "total_bytes": 213909504,
+        "dtype": "Q8_0",
+        "shape": [
+          768,
+          2048,
+          128
+        ]
+      },
+      "gate": {
+        "base_offset": 27421086720,
+        "per_expert_bytes": 1671168,
+        "total_bytes": 213909504,
+        "dtype": "Q8_0",
+        "shape": [
+          2048,
+          768,
+          128
+        ]
+      },
+      "up": {
+        "base_offset": 27636052992,
+        "per_expert_bytes": 1671168,
+        "total_bytes": 213909504,
+        "dtype": "Q8_0",
+        "shape": [
+          2048,
+          768,
+          128
+        ]
+      }
+    },
+    {
+      "layer": 41,
+      "down": {
+        "base_offset": 27870025728,
+        "per_expert_bytes": 1671168,
+        "total_bytes": 213909504,
+        "dtype": "Q8_0",
+        "shape": [
+          768,
+          2048,
+          128
+        ]
+      },
+      "gate": {
+        "base_offset": 28083935232,
+        "per_expert_bytes": 1671168,
+        "total_bytes": 213909504,
+        "dtype": "Q8_0",
+        "shape": [
+          2048,
+          768,
+          128
+        ]
+      },
+      "up": {
+        "base_offset": 28298901504,
+        "per_expert_bytes": 1671168,
+        "total_bytes": 213909504,
+        "dtype": "Q8_0",
+        "shape": [
+          2048,
+          768,
+          128
+        ]
+      }
+    },
+    {
+      "layer": 42,
+      "down": {
+        "base_offset": 28532874240,
+        "per_expert_bytes": 1671168,
+        "total_bytes": 213909504,
+        "dtype": "Q8_0",
+        "shape": [
+          768,
+          2048,
+          128
+        ]
+      },
+      "gate": {
+        "base_offset": 28746783744,
+        "per_expert_bytes": 1671168,
+        "total_bytes": 213909504,
+        "dtype": "Q8_0",
+        "shape": [
+          2048,
+          768,
+          128
+        ]
+      },
+      "up": {
+        "base_offset": 28961750016,
+        "per_expert_bytes": 1671168,
+        "total_bytes": 213909504,
+        "dtype": "Q8_0",
+        "shape": [
+          2048,
+          768,
+          128
+        ]
+      }
+    },
+    {
+      "layer": 43,
+      "down": {
+        "base_offset": 29195722752,
+        "per_expert_bytes": 1671168,
+        "total_bytes": 213909504,
+        "dtype": "Q8_0",
+        "shape": [
+          768,
+          2048,
+          128
+        ]
+      },
+      "gate": {
+        "base_offset": 29409632256,
+        "per_expert_bytes": 1671168,
+        "total_bytes": 213909504,
+        "dtype": "Q8_0",
+        "shape": [
+          2048,
+          768,
+          128
+        ]
+      },
+      "up": {
+        "base_offset": 29624598528,
+        "per_expert_bytes": 1671168,
+        "total_bytes": 213909504,
+        "dtype": "Q8_0",
+        "shape": [
+          2048,
+          768,
+          128
+        ]
+      }
+    },
+    {
+      "layer": 44,
+      "down": {
+        "base_offset": 29858571264,
+        "per_expert_bytes": 1671168,
+        "total_bytes": 213909504,
+        "dtype": "Q8_0",
+        "shape": [
+          768,
+          2048,
+          128
+        ]
+      },
+      "gate": {
+        "base_offset": 30072480768,
+        "per_expert_bytes": 1671168,
+        "total_bytes": 213909504,
+        "dtype": "Q8_0",
+        "shape": [
+          2048,
+          768,
+          128
+        ]
+      },
+      "up": {
+        "base_offset": 30287447040,
+        "per_expert_bytes": 1671168,
+        "total_bytes": 213909504,
+        "dtype": "Q8_0",
+        "shape": [
+          2048,
+          768,
+          128
+        ]
+      }
+    },
+    {
+      "layer": 45,
+      "down": {
+        "base_offset": 30521419776,
+        "per_expert_bytes": 1671168,
+        "total_bytes": 213909504,
+        "dtype": "Q8_0",
+        "shape": [
+          768,
+          2048,
+          128
+        ]
+      },
+      "gate": {
+        "base_offset": 30735329280,
+        "per_expert_bytes": 1671168,
+        "total_bytes": 213909504,
+        "dtype": "Q8_0",
+        "shape": [
+          2048,
+          768,
+          128
+        ]
+      },
+      "up": {
+        "base_offset": 30950295552,
+        "per_expert_bytes": 1671168,
+        "total_bytes": 213909504,
+        "dtype": "Q8_0",
+        "shape": [
+          2048,
+          768,
+          128
+        ]
+      }
+    },
+    {
+      "layer": 46,
+      "down": {
+        "base_offset": 31184268288,
+        "per_expert_bytes": 1671168,
+        "total_bytes": 213909504,
+        "dtype": "Q8_0",
+        "shape": [
+          768,
+          2048,
+          128
+        ]
+      },
+      "gate": {
+        "base_offset": 31398177792,
+        "per_expert_bytes": 1671168,
+        "total_bytes": 213909504,
+        "dtype": "Q8_0",
+        "shape": [
+          2048,
+          768,
+          128
+        ]
+      },
+      "up": {
+        "base_offset": 31613144064,
+        "per_expert_bytes": 1671168,
+        "total_bytes": 213909504,
+        "dtype": "Q8_0",
+        "shape": [
+          2048,
+          768,
+          128
+        ]
+      }
+    },
+    {
+      "layer": 47,
+      "down": {
+        "base_offset": 31847116800,
+        "per_expert_bytes": 1671168,
+        "total_bytes": 213909504,
+        "dtype": "Q8_0",
+        "shape": [
+          768,
+          2048,
+          128
+        ]
+      },
+      "gate": {
+        "base_offset": 32061026304,
+        "per_expert_bytes": 1671168,
+        "total_bytes": 213909504,
+        "dtype": "Q8_0",
+        "shape": [
+          2048,
+          768,
+          128
+        ]
+      },
+      "up": {
+        "base_offset": 32275992576,
+        "per_expert_bytes": 1671168,
+        "total_bytes": 213909504,
+        "dtype": "Q8_0",
+        "shape": [
+          2048,
+          768,
+          128
+        ]
+      }
+    }
+  ]
+}
