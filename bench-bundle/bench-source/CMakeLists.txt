@@ -10,6 +10,7 @@ if (APPLE)
 elseif (GGML_CUDA)
     list(APPEND MOE_CACHE_SOURCES
         moe_cuda_layer_stream.cu
+        moe_cuda_expert_cache.cu
     )
 endif()
 
@@ -31,10 +32,12 @@ if (APPLE)
 elseif (GGML_CUDA)
     find_package(CUDAToolkit REQUIRED)
     enable_language(CUDA)
-    set_source_files_properties(moe_cuda_layer_stream.cu PROPERTIES
+    set_source_files_properties(moe_cuda_layer_stream.cu moe_cuda_expert_cache.cu PROPERTIES
         LANGUAGE CUDA)
-    target_link_libraries(${TARGET} PRIVATE CUDA::cudart)
+    target_link_libraries(${TARGET} PRIVATE CUDA::cudart /usr/lib/x86_64-linux-gnu/libstdc++.so.6 pthread)
+    set_target_properties(${TARGET} PROPERTIES LINKER_LANGUAGE CXX)
     target_compile_definitions(${TARGET} PRIVATE
         MOE_LAYER_STREAM_AVAILABLE=1
-        MOE_LAYER_STREAM_BACKEND_CUDA=1)
+        MOE_LAYER_STREAM_BACKEND_CUDA=1
+        MOE_CUDA_EXPERT_CACHE_AVAILABLE=1)
 endif()

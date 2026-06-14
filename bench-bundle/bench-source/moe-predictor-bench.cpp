@@ -38,6 +38,9 @@
 #ifdef MOE_LAYER_STREAM_AVAILABLE
 #include "moe_layer_stream.h"
 #endif
+#ifdef MOE_CUDA_EXPERT_CACHE_AVAILABLE
+#include "moe_cuda_expert_cache.h"
+#endif
 
 #include <algorithm>
 #include <atomic>
@@ -269,6 +272,15 @@ struct bench_ctx {
     // metal_cache: hit/miss is logged but MoE compute still reads from CPU
     // mmap.
     moe_layer_stream_impl * layer_stream = nullptr;
+#endif
+
+#ifdef MOE_CUDA_EXPERT_CACHE_AVAILABLE
+    // Persistent per-expert CUDA cache (3070 experiment).
+    // Created in main() when --expert-cache-mb > 0.
+    moe_cuda_expert_cache * expert_cache = nullptr;
+    int64_t expert_cache_prefetch_calls = 0;   // bench-side counter (separate from cache's internal)
+#endif
+#ifdef MOE_LAYER_STREAM_AVAILABLE
     // Slot population modes:
     //   gate:   stamp expert 0's gate proj (1.6 MiB) as proxy — observational only
     //   full:   copy all 128 × 3 projs (~612 MiB) per layer — full-layer cache
@@ -976,6 +988,39 @@ static bool bench_cb(struct ggml_tensor * t, bool ask, void * user_data) {
                                b->last_prediction_for_layer[target_layer].data());
         b->last_prediction_k[target_layer] = k;
 
+#ifdef MOE_CUDA_EXPERT_CACHE_AVAILABLE
+        // ── Prefetch predicted experts into the persistent CUDA cache ──
+        // Issues async H→D for each (target_layer, expert, gate/up/down).
+        // On hit (already cached), the cache no-ops.
+        if (b->expert_cache != nullptr &&
+            target_layer < (int)b->expert_ranges.size()) {
+            const auto & ranges = b->expert_ranges[target_layer];
+            for (int p = 0; p < k; ++p) {
+                const int32_t e = b->last_prediction_for_layer[target_layer][p];
+                if (e < 0 || e >= b->weights.num_experts) continue;
+                if (ranges.gate.base_addr && ranges.gate.per_expert_bytes) {
+                    moe_cuda_expert_cache_prefetch(
+                        b->expert_cache, target_layer, e, /*kind=gate*/0,
+                        ranges.gate.base_addr + (size_t)e * ranges.gate.per_expert_bytes,
+                        ranges.gate.per_expert_bytes);
+                }
+                if (ranges.up.base_addr && ranges.up.per_expert_bytes) {
+                    moe_cuda_expert_cache_prefetch(
+                        b->expert_cache, target_layer, e, /*kind=up*/1,
+                        ranges.up.base_addr + (size_t)e * ranges.up.per_expert_bytes,
+                        ranges.up.per_expert_bytes);
+                }
+                if (ranges.down.base_addr && ranges.down.per_expert_bytes) {
+                    moe_cuda_expert_cache_prefetch(
+                        b->expert_cache, target_layer, e, /*kind=down*/2,
+                        ranges.down.base_addr + (size_t)e * ranges.down.per_expert_bytes,
+                        ranges.down.per_expert_bytes);
+                }
+                b->expert_cache_prefetch_calls++;
+            }
+        }
+#endif
+
         // ── REAL prefetch: enqueue predicted experts' byte ranges ──
         if (b->gguf_mmap_addr != nullptr &&
             target_layer < (int)b->expert_ranges.size()) {
@@ -1168,6 +1213,7 @@ int main(int argc, char ** argv) {
     int32_t metal_cache_slots = 0;     // 0 = disable Metal cache (observational integration)
     int32_t metal_cache_slot_kb = 0;   // 0 = auto from expert offsets
     int32_t layer_stream_buffers = 0;  // 0 = disable layered streaming cache
+    int32_t expert_cache_mb = 0;       // 0 = disable persistent CUDA expert cache
     int32_t layer_stream_layer_kb = 0; // 0 = auto from expert offsets
     std::string layer_stream_mode = "gate";  // "gate" (1 expert gate proj proxy) or "full" (all 128 × 3 projs)
     bool layer_stream_hotpath = false;       // when true: swap ffn_*_exps->data to Metal slot on ffn_moe_topk-L
@@ -1244,6 +1290,13 @@ int main(int argc, char ** argv) {
             layer_stream_hotpath = true;
             for (int j = i; j + 1 < argc; ++j) argv[j] = argv[j + 1];
             argc -= 1; --i;
+        } else if (strcmp(argv[i], "--expert-cache-mb") == 0 && i + 1 < argc) {
+            // Persistent CUDA per-expert cache pool size in MiB. When > 0,
+            // allocates a VRAM pool and installs the copy_experts D→D hook.
+            // Predictor's chained-prediction loop prefetches into this cache.
+            expert_cache_mb = std::atoi(argv[i + 1]);
+            for (int j = i; j + 2 < argc; ++j) argv[j] = argv[j + 2];
+            argc -= 2; --i;
         } else if (strcmp(argv[i], "--cache-size") == 0 && i + 1 < argc) {
             // experts/layer in simulated LRU cache. 0 = disable simulation.
             cache_size = std::atoi(argv[i + 1]);
@@ -1497,6 +1550,45 @@ int main(int argc, char ** argv) {
                         layer_stream_buffers, layer_bytes, layer_stream_mode.c_str(),
                         layer_stream_hotpath ? "on" : "off",
                         ((double)layer_stream_buffers * layer_bytes) / (1024.0 * 1024.0));
+            }
+#endif
+
+#ifdef MOE_CUDA_EXPERT_CACHE_AVAILABLE
+            // ── Persistent CUDA per-expert cache + copy_experts hook ─────
+            // When expert_cache_mb > 0, allocate a pool of VRAM and install
+            // the hook so ggml-backend.cpp's copy_experts checks our cache
+            // before doing PCIe transfer (D→D on hit, original H→D on miss).
+            if (expert_cache_mb > 0) {
+                // Compute per-expert sizes from the expert_offsets json.
+                size_t gate_bytes = 0, up_bytes = 0, down_bytes = 0;
+                for (const auto & r : bc.expert_ranges) {
+                    if (r.gate.per_expert_bytes > 0) gate_bytes = std::max(gate_bytes, (size_t)r.gate.per_expert_bytes);
+                    if (r.up.per_expert_bytes   > 0) up_bytes   = std::max(up_bytes,   (size_t)r.up.per_expert_bytes);
+                    if (r.down.per_expert_bytes > 0) down_bytes = std::max(down_bytes, (size_t)r.down.per_expert_bytes);
+                }
+                if (gate_bytes == 0 || up_bytes == 0 || down_bytes == 0) {
+                    LOG_ERR("expert-cache: could not determine per-expert byte sizes from offsets json\n");
+                    return 1;
+                }
+                const size_t slot_size = std::max({gate_bytes, up_bytes, down_bytes});
+                const int n_slots = (int)((size_t)expert_cache_mb * 1024 * 1024 / slot_size);
+                if (n_slots < 16) {
+                    LOG_ERR("expert-cache: %d slots is too small (need >= 16). Increase --expert-cache-mb (currently %d)\n",
+                            n_slots, expert_cache_mb);
+                    return 1;
+                }
+                bc.expert_cache = moe_cuda_expert_cache_create(
+                    bc.weights.n_layers, bc.weights.num_experts,
+                    gate_bytes, up_bytes, down_bytes,
+                    n_slots);
+                if (!bc.expert_cache) {
+                    LOG_ERR("expert-cache: create failed\n");
+                    return 1;
+                }
+                moe_cuda_expert_cache_install_hook(bc.expert_cache);
+                LOG_INF("expert-cache: %d slots × %zu bytes = %.1f MiB; hook installed\n",
+                        n_slots, slot_size,
+                        ((double)n_slots * slot_size) / (1024.0 * 1024.0));
             }
 #endif
 
@@ -1782,6 +1874,20 @@ int main(int argc, char ** argv) {
         log_memory_state("after_layer_stream_stats");
         moe_layer_stream_destroy(bc.layer_stream);   // joins worker → safe to munmap after
         bc.layer_stream = nullptr;
+    }
+#endif
+
+#ifdef MOE_CUDA_EXPERT_CACHE_AVAILABLE
+    // Drain + destroy expert cache BEFORE munmap. Prefetches may still be
+    // reading host mmap pages.
+    if (bc.expert_cache != nullptr) {
+        moe_cuda_expert_cache_drain(bc.expert_cache);
+        moe_cuda_expert_cache_print_stats(bc.expert_cache, "final");
+        fprintf(stderr,
+            "[bench expert_cache] prefetch_calls=%lld\n",
+            (long long)bc.expert_cache_prefetch_calls);
+        moe_cuda_expert_cache_destroy(bc.expert_cache);
+        bc.expert_cache = nullptr;
     }
 #endif
 
