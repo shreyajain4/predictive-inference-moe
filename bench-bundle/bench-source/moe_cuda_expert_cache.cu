@@ -314,7 +314,11 @@ extern "C" int moe_cuda_expert_cache_try_d2d(
         const size_t pad_bytes = total_bytes - experts_bytes;
         CUDA_CHECK(cudaMemsetAsync(dst_base + experts_bytes, 0, pad_bytes, 0));
     }
-    cudaStreamSynchronize(0);
+    // Use cudaDeviceSynchronize() not cudaStreamSynchronize(0) — under
+    // CUDA 12 per-thread default streams, the default stream we use here
+    // is independent of ggml-cuda's compute stream. We need device-wide
+    // synchronization to make our writes visible to all subsequent reads.
+    cudaDeviceSynchronize();
 
     c->stat_d2d_hits.fetch_add(1, std::memory_order_relaxed);
     c->stat_bytes_d2d_served.fetch_add((int64_t)experts_bytes, std::memory_order_relaxed);
