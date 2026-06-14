@@ -286,13 +286,25 @@ extern "C" int moe_cuda_expert_cache_try_d2d(
     // All cached. Issue D→D for each expert from its slot to dst_offset region.
     // dst layout: dst[dst_offset + i * per_expert] for i in [0..n)
     uint8_t * dst_base = (uint8_t *)input_cpy_data + dst_offset;
+    const size_t expert_bytes_total = (size_t)n_experts_in_run * per_expert;
     size_t bytes_copied = 0;
-    for (int32_t i = 0; i < n_experts_in_run && bytes_copied < total_bytes; ++i) {
+    for (int32_t i = 0; i < n_experts_in_run && bytes_copied < expert_bytes_total; ++i) {
         const uint8_t * src = c->pool + (size_t)slot_indices[i] * c->slot_size;
-        size_t to_copy = std::min(per_expert, total_bytes - bytes_copied);
-        CUDA_CHECK(cudaMemcpyAsync(dst_base + bytes_copied, src, to_copy,
+        CUDA_CHECK(cudaMemcpyAsync(dst_base + bytes_copied, src, per_expert,
                                     cudaMemcpyDeviceToDevice, /*default stream*/ 0));
-        bytes_copied += to_copy;
+        bytes_copied += per_expert;
+    }
+    // If total_bytes > expert_bytes_total, ggml's copy_experts wanted us to
+    // copy a 512-byte "padding" after the last expert (to prevent MMQ from
+    // reading NaN-shaped bytes in the input_cpy buffer). The original H→D
+    // path copies the next expert's first bytes there; we don't have access
+    // to that expert in the cache, so we memset to zero. This is bit-different
+    // from the PCIe path but should be NaN-safe and not bias routing.
+    if (total_bytes > expert_bytes_total) {
+        const size_t pad_bytes = total_bytes - expert_bytes_total;
+        CUDA_CHECK(cudaMemsetAsync(dst_base + bytes_copied, 0, pad_bytes,
+                                    /*default stream*/ 0));
+        bytes_copied += pad_bytes;
     }
     // Synchronize so data is visible to the compute stream that reads input_cpy next.
     cudaStreamSynchronize(0);
