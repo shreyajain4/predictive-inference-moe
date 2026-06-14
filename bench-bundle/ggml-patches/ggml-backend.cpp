@@ -1725,6 +1725,12 @@ static enum ggml_status ggml_backend_sched_compute_splits(ggml_backend_sched_t s
                         // We coalesce contiguous set bits into one tensor_set_async
                         // call to keep launch overhead similar to the original
                         // single-call path when the run is fully uncached.
+                        //
+                        // MOE_CACHE_SKIP_UNCACHED=1 turns uncached experts into
+                        // memset(0) regions — approximate routing. The MMQ kernel
+                        // produces 0 for those experts, the router's weighted sum
+                        // drops them. Quality risk: real. Latency win: strict.
+                        const bool skip_uncached = (getenv("MOE_CACHE_SKIP_UNCACHED") != nullptr);
                         if (uncached_bits != 0) {
                             int32_t i = 0;
                             const int32_t n = n_experts_in_run;
@@ -1732,7 +1738,7 @@ static enum ggml_status ggml_backend_sched_compute_splits(ggml_backend_sched_t s
                                 if (!((uncached_bits >> i) & 1)) { i++; continue; }
                                 int32_t j = i + 1;
                                 while (j < n && ((uncached_bits >> j) & 1)) { j++; }
-                                // Sub-run [i..j-1] needs PCIe.
+                                // Sub-run [i..j-1] needs PCIe (or memset if skip mode).
                                 const size_t sub_off  = expert_offset + (size_t)i * expert_size;
                                 const size_t sub_len  = (size_t)(j - i) * expert_size;
                                 // Tack the 512-byte MMQ-safety padding onto the LAST
@@ -1740,23 +1746,32 @@ static enum ggml_status ggml_backend_sched_compute_splits(ggml_backend_sched_t s
                                 // expert in the tensor). This matches the original
                                 // single-call padding semantics.
                                 const bool   include_pad = (j == n) && (padding_end > 0);
-                                const size_t pcie_bytes  = include_pad ? sub_len + padding_end : sub_len;
-                                ggml_backend_tensor_set_async(split_backend, input_cpy,
-                                    (const uint8_t *)input->data + sub_off, sub_off, pcie_bytes);
-                                // Snapshot just this sub-run so subsequent uses can cache-hit.
-                                if (g_moe_expert_cache_snapshot && input->name) {
-                                    g_moe_expert_cache_snapshot(input->name,
-                                        first_id + i, j - i,
-                                        input_cpy->data, sub_off, expert_size, pcie_bytes);
+                                const size_t copy_bytes  = include_pad ? sub_len + padding_end : sub_len;
+                                if (skip_uncached) {
+                                    // Approximate-routing path: zero-fill instead of PCIe.
+                                    ggml_backend_tensor_memset(input_cpy, 0, sub_off, copy_bytes);
+                                    // Do NOT snapshot — zero is not a real expert.
+                                } else {
+                                    ggml_backend_tensor_set_async(split_backend, input_cpy,
+                                        (const uint8_t *)input->data + sub_off, sub_off, copy_bytes);
+                                    if (g_moe_expert_cache_snapshot && input->name) {
+                                        g_moe_expert_cache_snapshot(input->name,
+                                            first_id + i, j - i,
+                                            input_cpy->data, sub_off, expert_size, copy_bytes);
+                                    }
                                 }
                                 i = j;
                             }
                             // If last expert was a cache hit but padding wasn't covered,
-                            // PCIe just the trailing pad bytes to avoid MMQ NaNs.
+                            // PCIe (or memset) just the trailing pad bytes to avoid MMQ NaNs.
                             if (padding_end > 0 && !((uncached_bits >> (n - 1)) & 1)) {
                                 const size_t pad_off = expert_offset + (size_t)n * expert_size;
-                                ggml_backend_tensor_set_async(split_backend, input_cpy,
-                                    (const uint8_t *)input->data + pad_off, pad_off, padding_end);
+                                if (skip_uncached) {
+                                    ggml_backend_tensor_memset(input_cpy, 0, pad_off, padding_end);
+                                } else {
+                                    ggml_backend_tensor_set_async(split_backend, input_cpy,
+                                        (const uint8_t *)input->data + pad_off, pad_off, padding_end);
+                                }
                             }
 
                             // ── MOE-DEBUG: one-shot byte-dump (full-miss path only) ──
