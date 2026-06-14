@@ -1466,6 +1466,36 @@ int main(int argc, char ** argv) {
                 if (r.down.per_expert_bytes > 0)
                     r.down.base_addr = bc.gguf_mmap_addr + (intptr_t)r.down.base_addr;
             }
+            // ── MOE-DBG: dump bench's view of (L=1, gate, e=91) ──
+            // MOE-VERIFY's first cache hit was at this key. If our bytes
+            // match llama.cpp's input->data + 91*expert_size view, the
+            // offsets are correct and the bug is in slot management. If
+            // not, our extract_expert_offsets.py or the rebase is wrong.
+            if (getenv("MOE_OFFSETS_DBG") && bc.expert_ranges.size() > 1) {
+                const auto & r = bc.expert_ranges[1].gate;
+                if (r.base_addr && r.per_expert_bytes) {
+                    const unsigned char * p = (const unsigned char *)
+                        (r.base_addr + (size_t)91 * r.per_expert_bytes);
+                    fprintf(stderr, "[OFFSETS-DBG] bench view L=1 gate e=91 "
+                            "base_addr=%p per_expert=%zu offset_in_tensor=%zu first 64:\n",
+                            r.base_addr, r.per_expert_bytes,
+                            (size_t)91 * r.per_expert_bytes);
+                    fprintf(stderr, "[OFFSETS-DBG] ");
+                    for (int i = 0; i < 64; ++i) fprintf(stderr, "%02x ", p[i]);
+                    fprintf(stderr, "\n");
+                    // Also dump (L=1, gate, e=0) and (L=0, gate, e=0) for context.
+                    const unsigned char * p0 = (const unsigned char *)r.base_addr;
+                    fprintf(stderr, "[OFFSETS-DBG] bench view L=1 gate e=0  first 64:\n[OFFSETS-DBG] ");
+                    for (int i = 0; i < 64; ++i) fprintf(stderr, "%02x ", p0[i]);
+                    fprintf(stderr, "\n");
+                    if (bc.expert_ranges.size() > 0 && bc.expert_ranges[0].gate.base_addr) {
+                        const unsigned char * p00 = (const unsigned char *)bc.expert_ranges[0].gate.base_addr;
+                        fprintf(stderr, "[OFFSETS-DBG] bench view L=0 gate e=0  first 64:\n[OFFSETS-DBG] ");
+                        for (int i = 0; i < 64; ++i) fprintf(stderr, "%02x ", p00[i]);
+                        fprintf(stderr, "\n");
+                    }
+                }
+            }
             // (Previously we set POSIX_MADV_RANDOM on the whole mmap, but this
             //  prevented helpful sequential readahead for hot non-MoE tensors
             //  like attention weights. We now let the kernel use its default
