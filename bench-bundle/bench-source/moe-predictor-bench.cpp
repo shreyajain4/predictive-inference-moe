@@ -1712,6 +1712,16 @@ int main(int argc, char ** argv) {
             if (logits[v] > best_v) { best_v = logits[v]; best = v; }
         }
         tok_id = best;
+        // Print the token piece to stdout for output verification.
+        {
+            char piece[128];
+            int piece_len = llama_token_to_piece(vocab, tok_id, piece, sizeof(piece) - 1, 0, true);
+            if (piece_len > 0) {
+                piece[piece_len] = 0;
+                fputs(piece, stdout);
+                fflush(stdout);
+            }
+        }
         if (llama_vocab_is_eog(vocab, tok_id)) break;
         // Log memory state at step 0 (first decode) — Metal OOM happens here.
         // Also every 16 steps to track resident set growth.
