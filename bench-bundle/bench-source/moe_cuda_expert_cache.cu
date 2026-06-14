@@ -8,6 +8,7 @@
 
 #include "ggml-backend.h"   // for ggml_set_moe_expert_cache_hook
 
+#include <algorithm>
 #include <atomic>
 #include <cstdio>
 #include <cstdlib>
@@ -125,7 +126,7 @@ extern "C" moe_cuda_expert_cache * moe_cuda_expert_cache_create(
     c->expert_size[0] = expert_size_gate;
     c->expert_size[1] = expert_size_up;
     c->expert_size[2] = expert_size_down;
-    c->slot_size = std::max({expert_size_gate, expert_size_up, expert_size_down});
+    c->slot_size = std::max(std::max(expert_size_gate, expert_size_up), expert_size_down);
     c->n_slots = n_slots;
 
     size_t pool_bytes = (size_t)n_slots * c->slot_size;

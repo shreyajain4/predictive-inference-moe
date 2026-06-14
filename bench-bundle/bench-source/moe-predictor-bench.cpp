@@ -1570,7 +1570,7 @@ int main(int argc, char ** argv) {
                     LOG_ERR("expert-cache: could not determine per-expert byte sizes from offsets json\n");
                     return 1;
                 }
-                const size_t slot_size = std::max({gate_bytes, up_bytes, down_bytes});
+                const size_t slot_size = std::max(std::max(gate_bytes, up_bytes), down_bytes);
                 const int n_slots = (int)((size_t)expert_cache_mb * 1024 * 1024 / slot_size);
                 if (n_slots < 16) {
                     LOG_ERR("expert-cache: %d slots is too small (need >= 16). Increase --expert-cache-mb (currently %d)\n",
