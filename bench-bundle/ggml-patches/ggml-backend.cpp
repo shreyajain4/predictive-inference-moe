@@ -57,6 +57,10 @@ static ggml_moe_expert_cache_try_d2d_fn g_moe_expert_cache_hook = nullptr;
 extern "C" void ggml_set_moe_expert_cache_hook(ggml_moe_expert_cache_try_d2d_fn fn) {
     g_moe_expert_cache_hook = fn;
 }
+static ggml_moe_expert_cache_snapshot_fn g_moe_expert_cache_snapshot = nullptr;
+extern "C" void ggml_set_moe_expert_cache_snapshot_hook(ggml_moe_expert_cache_snapshot_fn fn) {
+    g_moe_expert_cache_snapshot = fn;
+}
 
 
 // backend buffer type
@@ -1680,6 +1684,15 @@ static enum ggml_status ggml_backend_sched_compute_splits(ggml_backend_sched_t s
                                 // copy a bit extra at the to ensure there are no NaNs in the padding of the last expert
                                 // this is necessary for MMQ in the CUDA backend
                                 total_bytes);
+                            // After PCIe lands the converted bytes in input_cpy,
+                            // give the cache a chance to snapshot them (D→D into
+                            // a GPU pool) so subsequent calls can serve from cache.
+                            if (g_moe_expert_cache_snapshot && input->name) {
+                                g_moe_expert_cache_snapshot(input->name,
+                                    first_id, last_id - first_id + 1,
+                                    input_cpy->data, expert_offset,
+                                    expert_size, total_bytes);
+                            }
                         }
                     };
 

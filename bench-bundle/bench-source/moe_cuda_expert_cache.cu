@@ -200,45 +200,18 @@ static void touch_slot(moe_cuda_expert_cache * c, int slot_idx) {
 
 // ── Prefetch ────────────────────────────────────────────────────────────
 
-extern "C" int moe_cuda_expert_cache_prefetch(
+extern "C" int moe_cuda_expert_cache_touch(
     moe_cuda_expert_cache * c,
-    int layer_id, int expert_id, int kind,
-    const void * src_host, size_t nbytes)
+    int layer_id, int expert_id, int kind)
 {
-    if (!c || !src_host || kind < 0 || kind > 2) return -1;
-    if (nbytes != c->expert_size[kind]) return -1;
-
+    if (!c || kind < 0 || kind > 2) return -1;
     expert_key key{layer_id, expert_id, kind};
-    int slot_idx = -1;
-
-    {
-        std::lock_guard<std::mutex> lk(c->mu);
-        auto it = c->index.find(key);
-        if (it != c->index.end()) {
-            // Already cached — refresh LRU and return.
-            touch_slot(c, it->second);
-            c->stat_prefetches_dedup.fetch_add(1, std::memory_order_relaxed);
-            return 0;
-        }
-        // Allocate (free or evict)
-        slot_idx = alloc_or_evict_slot(c);
-        if (slot_idx < 0) return -1;
-        auto & s = c->slots[slot_idx];
-        s.occupied = true;
-        s.key = key;
-        s.bytes_used = nbytes;
-        c->lru_order.push_front(slot_idx);
-        s.lru_it = c->lru_order.begin();
-        c->index[key] = slot_idx;
-    }
-
-    // Issue async H→D on the prefetch stream
-    void * dst = c->pool + (size_t)slot_idx * c->slot_size;
-    CUDA_CHECK(cudaMemcpyAsync(dst, src_host, nbytes, cudaMemcpyHostToDevice, c->prefetch_stream));
-
-    c->stat_prefetches.fetch_add(1, std::memory_order_relaxed);
-    c->stat_bytes_prefetched.fetch_add((int64_t)nbytes, std::memory_order_relaxed);
-    return 0;
+    std::lock_guard<std::mutex> lk(c->mu);
+    auto it = c->index.find(key);
+    if (it == c->index.end()) return 0;   // not in cache, can't touch
+    touch_slot(c, it->second);
+    c->stat_prefetches_dedup.fetch_add(1, std::memory_order_relaxed);
+    return 1;
 }
 
 extern "C" void moe_cuda_expert_cache_drain(moe_cuda_expert_cache * c) {
@@ -358,9 +331,70 @@ extern "C" int moe_cuda_expert_cache_try_d2d(
     return 1;
 }
 
+// Snapshot post-PCIe bytes from input_cpy into our cache slots (D→D). Called
+// by ggml-backend.cpp AFTER ggml_backend_tensor_set_async writes input_cpy.
+// We do a cudaDeviceSynchronize first to ensure the PCIe write completed
+// (its on backend's stream, our snapshot is on default stream — without
+// device sync the read might see stale bytes).
+extern "C" void moe_cuda_expert_cache_snapshot(
+    const char * tensor_name,
+    int32_t first_expert_id, int32_t n_experts_in_run,
+    void *  input_cpy_data,  size_t dst_offset,
+    size_t  expert_size,     size_t total_bytes)
+{
+    (void)total_bytes;  // unused — we snapshot only the expert bytes, not padding
+    if (!g_cache || !tensor_name || !input_cpy_data) return;
+
+    int layer = -1, kind = -1;
+    if (!parse_tensor_name(tensor_name, layer, kind)) return;
+    moe_cuda_expert_cache * c = g_cache;
+    const size_t per_expert = c->expert_size[kind];
+    if (expert_size != per_expert) return;   // slot size mismatch, skip caching
+
+    // Wait for the PCIe write on the backend's stream to complete. Coarse
+    // but correct. Optimization later: use cudaStreamWaitEvent on a specific
+    // event from the backend.
+    cudaDeviceSynchronize();
+
+    // Allocate slots for each expert in the run (or reuse if already cached).
+    const uint8_t * src_base = (const uint8_t *)input_cpy_data + dst_offset;
+    for (int32_t i = 0; i < n_experts_in_run; ++i) {
+        expert_key key{layer, first_expert_id + i, kind};
+        int slot_idx = -1;
+        {
+            std::lock_guard<std::mutex> lk(c->mu);
+            auto it = c->index.find(key);
+            if (it != c->index.end()) {
+                // Already cached — refresh LRU; bytes should be identical
+                // (PCIe wrote the same converted format the slot already has).
+                touch_slot(c, it->second);
+                c->stat_prefetches_dedup.fetch_add(1, std::memory_order_relaxed);
+                continue;
+            }
+            slot_idx = alloc_or_evict_slot(c);
+            if (slot_idx < 0) continue;
+            auto & s = c->slots[slot_idx];
+            s.occupied = true;
+            s.key = key;
+            s.bytes_used = expert_size;
+            c->lru_order.push_front(slot_idx);
+            s.lru_it = c->lru_order.begin();
+            c->index[key] = slot_idx;
+        }
+        // D→D from input_cpy (already on GPU) to our pool slot.
+        void *       dst = c->pool + (size_t)slot_idx * c->slot_size;
+        const void * src = src_base + (size_t)i * expert_size;
+        CUDA_CHECK(cudaMemcpyAsync(dst, src, expert_size,
+                                    cudaMemcpyDeviceToDevice, c->prefetch_stream));
+        c->stat_prefetches.fetch_add(1, std::memory_order_relaxed);
+        c->stat_bytes_prefetched.fetch_add((int64_t)expert_size, std::memory_order_relaxed);
+    }
+}
+
 extern "C" void moe_cuda_expert_cache_install_hook(moe_cuda_expert_cache * c) {
     g_cache = c;
     ggml_set_moe_expert_cache_hook(moe_cuda_expert_cache_try_d2d);
+    ggml_set_moe_expert_cache_snapshot_hook(moe_cuda_expert_cache_snapshot);
 }
 
 // ── Stats ───────────────────────────────────────────────────────────────

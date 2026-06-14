@@ -113,6 +113,19 @@ extern "C" {
         size_t       total_bytes);
     GGML_API void ggml_set_moe_expert_cache_hook(ggml_moe_expert_cache_try_d2d_fn fn);
 
+    // Called AFTER PCIe ggml_backend_tensor_set_async writes input_cpy. The
+    // hook may snapshot post-conversion bytes for the run [first_expert_id..)
+    // into a GPU cache so subsequent calls can D→D from cache instead of PCIe.
+    typedef void (*ggml_moe_expert_cache_snapshot_fn)(
+        const char * tensor_name,
+        int32_t      first_expert_id,
+        int32_t      n_experts_in_run,
+        void *       input_cpy_data,
+        size_t       dst_offset,
+        size_t       expert_size,
+        size_t       total_bytes);
+    GGML_API void ggml_set_moe_expert_cache_snapshot_hook(ggml_moe_expert_cache_snapshot_fn fn);
+
     GGML_API void ggml_backend_tensor_set_2d_async(ggml_backend_t backend,       struct ggml_tensor * tensor, const void * data, size_t offset, size_t size, size_t n_copies, size_t stride_tensor, size_t stride_data);
     GGML_API void ggml_backend_tensor_get_2d_async(ggml_backend_t backend, const struct ggml_tensor * tensor,       void * data, size_t offset, size_t size, size_t n_copies, size_t stride_tensor, size_t stride_data);
 

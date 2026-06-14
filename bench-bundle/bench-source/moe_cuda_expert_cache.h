@@ -55,18 +55,15 @@ moe_cuda_expert_cache * moe_cuda_expert_cache_create(
 
 void moe_cuda_expert_cache_destroy(moe_cuda_expert_cache * c);
 
-// Prefetch one (layer, expert, kind) tuple from host RAM into the cache.
-//   kind: 0=gate, 1=up, 2=down
-//   src_host: host pointer to the expert's start (this projection)
-//   nbytes:   should equal expert_size_<kind> from create
-// Returns 0 on success (queued or already cached), -1 on error.
-// Issues cudaMemcpyAsync on the prefetch stream and returns immediately.
-int moe_cuda_expert_cache_prefetch(
+// LRU "touch" — if (layer, expert, kind) is in the cache, promote to
+// most-recently-used so it's less likely to be evicted. No-op on miss.
+// Used by the bench's predictor: predicted experts get touched so they're
+// retained across decode steps.
+int moe_cuda_expert_cache_touch(
     moe_cuda_expert_cache * c,
-    int layer_id, int expert_id, int kind,
-    const void * src_host, size_t nbytes);
+    int layer_id, int expert_id, int kind);
 
-// Wait for all in-flight prefetches to finish (typically called before bench exits).
+// Wait for all in-flight cache operations to finish (typically called before bench exits).
 void moe_cuda_expert_cache_drain(moe_cuda_expert_cache * c);
 
 // Hook function used by ggml-backend.cpp's copy_experts.
@@ -80,7 +77,16 @@ int moe_cuda_expert_cache_try_d2d(
     size_t  expert_size,
     size_t  total_bytes);
 
-// Install the above as ggml-backend's hook. Call this once after creating the cache.
+// Hook called by ggml-backend.cpp AFTER a successful PCIe write. Captures
+// the post-conversion bytes into a cache slot (D→D from input_cpy to pool).
+// Allocates a new slot via LRU eviction if necessary.
+void moe_cuda_expert_cache_snapshot(
+    const char * tensor_name,
+    int32_t first_expert_id, int32_t n_experts_in_run,
+    void *  input_cpy_data,  size_t dst_offset,
+    size_t  expert_size,     size_t total_bytes);
+
+// Install both hooks (try_d2d on miss-lookup, snapshot on PCIe-completion).
 void moe_cuda_expert_cache_install_hook(moe_cuda_expert_cache * c);
 
 // ── Stats ────────────────────────────────────────────────────────────────
