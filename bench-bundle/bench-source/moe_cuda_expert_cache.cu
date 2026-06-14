@@ -330,13 +330,9 @@ extern "C" int moe_cuda_expert_cache_try_d2d(
             fprintf(stderr, "\n");
         }
     }
-    // MMQ padding region (the extra 512-byte tail after the last expert when
-    // not at the end of the tensor). PCIe path writes next-expert's first
-    // bytes there; we zero-fill to be NaN-safe.
-    if (total_bytes > experts_bytes) {
-        const size_t pad_bytes = total_bytes - experts_bytes;
-        CUDA_CHECK(cudaMemsetAsync(dst_base + experts_bytes, 0, pad_bytes, 0));
-    }
+    // MMQ padding region — DEBUG: skip it. If output becomes coherent
+    // without writing the padding, the bug was zero-padding biasing routing.
+    // If output is still garbage, the padding isn't the issue.
     // Use cudaDeviceSynchronize() not cudaStreamSynchronize(0) — under
     // CUDA 12 per-thread default streams, the default stream we use here
     // is independent of ggml-cuda's compute stream. We need device-wide
