@@ -307,6 +307,20 @@ extern "C" int moe_cuda_expert_cache_try_d2d(
         }
     }
 
+    // ALSO dump what's in input_cpy BEFORE we overwrite. If PCIe path
+    // converts/reorders Q4_K weights when copying, this would show the
+    // converted form — comparing to our raw cached bytes reveals whether
+    // we need to do the same conversion.
+    if (expect_dump) {
+        uint8_t pre_d2d[16] = {};
+        cudaMemcpy(pre_d2d,
+                   (const uint8_t*)input_cpy_data + dst_offset,
+                   16, cudaMemcpyDeviceToHost);
+        fprintf(stderr, "[CACHE-DUMP] PRE-d2d input_cpy[dst_offset..+16]:");
+        for (int b = 0; b < 16; ++b) fprintf(stderr, " %02x", pre_d2d[b]);
+        fprintf(stderr, "  (this is what PCIe wrote earlier OR is uninitialized)\n");
+    }
+
     // Stride writes by expert_size (= ggml's nb[2]). Each cached slot holds
     // per_expert (= expert_size, we just bailed out otherwise) bytes of expert data.
     uint8_t * dst_base = (uint8_t *)input_cpy_data + dst_offset;
