@@ -297,6 +297,18 @@ struct bench_ctx {
     // populated_predicted[L] = sorted-set of K predicted experts that the
     // subset prefetch staged into slot[L%N]. Used at swap-time gate.
     std::vector<std::vector<int32_t>> populated_predicted;   // [L][K]
+
+    // ── Sensitivity-aware substitution policy (Mac path) ────────────────
+    // When a layer fires with some experts NOT in populated_predicted, the
+    // gate would normally fail and we'd fall back to mmap. If sensitivity for
+    // that layer is below threshold, we substitute the missing experts'
+    // bytes in the slot with a populated expert's bytes (in-place memcpy
+    // inside the shared-storage MTLBuffer) and allow the swap.
+    std::vector<float> sensitivity_per_layer;     // indexed by absolute layer id
+    float              substitution_threshold = 0.0f;  // 0 → disabled
+    bool               substitution_enabled = false;
+    int64_t            hotpath_substitutions = 0;     // # fired experts replaced
+    int64_t            hotpath_substitution_layers = 0;  // # layers where substitution applied
     // Slot occupancy tracking: slot_to_layer[idx] = the layer L most recently
     // prefetched into slot[idx]. When this layer's slot is about to be
     // overwritten by a new prefetch, we restore its tensor->data to orig so
@@ -762,6 +774,7 @@ static bool bench_cb(struct ggml_tensor * t, bool ask, void * user_data) {
         b->ffn_down_exps_tensors[curr_layer] != nullptr) {
 
         bool gate_passes = true;
+        std::vector<int32_t> missing_in_populated;  // experts fired but not predicted (used by substitution)
         if (b->layer_stream_subset_mode) {
             // Check fired ⊂ populated_predicted[curr_layer]
             if (curr_layer >= (int)b->populated_predicted.size()) {
@@ -773,13 +786,65 @@ static bool bench_cb(struct ggml_tensor * t, bool ask, void * user_data) {
                 } else {
                     for (int32_t e : observed) {
                         if (!std::binary_search(populated.begin(), populated.end(), e)) {
-                            gate_passes = false;
-                            break;
+                            missing_in_populated.push_back(e);
                         }
                     }
+                    gate_passes = missing_in_populated.empty();
                 }
             }
         }
+
+        // ── Sensitivity-aware substitution rescue ───────────────────────
+        // If the gate failed (subset mode, some fired expert not predicted),
+        // AND the current layer is below the sensitivity threshold, copy a
+        // populated expert's bytes into each missing expert's slot region.
+        // This permits the swap to proceed at the cost of using stand-in
+        // weights for the predictor's misses.
+        bool used_substitution = false;
+        if (!gate_passes
+            && b->substitution_enabled
+            && curr_layer < (int)b->sensitivity_per_layer.size()
+            && b->sensitivity_per_layer[curr_layer] > 0.0f
+            && b->sensitivity_per_layer[curr_layer] <= b->substitution_threshold
+            && !missing_in_populated.empty()
+            && curr_layer < (int)b->populated_predicted.size()
+            && !b->populated_predicted[curr_layer].empty()
+            && curr_layer < (int)b->expert_ranges.size()) {
+
+            void * try_slot = moe_layer_stream_get(b->layer_stream, curr_layer);
+            if (try_slot != nullptr) {
+                const auto & populated = b->populated_predicted[curr_layer];
+                const int32_t substitute = populated[0];  // pick first predicted as donor
+                const auto & ranges = b->expert_ranges[curr_layer];
+                const size_t gate_off = 0;
+                const size_t up_off   = ranges.gate.total_bytes;
+                const size_t down_off = ranges.gate.total_bytes + ranges.up.total_bytes;
+                char * slot = (char *)try_slot;
+
+                for (int32_t e : missing_in_populated) {
+                    if (ranges.gate.per_expert_bytes > 0) {
+                        memcpy(slot + gate_off + (size_t)e * ranges.gate.per_expert_bytes,
+                               slot + gate_off + (size_t)substitute * ranges.gate.per_expert_bytes,
+                               ranges.gate.per_expert_bytes);
+                    }
+                    if (ranges.up.per_expert_bytes > 0) {
+                        memcpy(slot + up_off + (size_t)e * ranges.up.per_expert_bytes,
+                               slot + up_off + (size_t)substitute * ranges.up.per_expert_bytes,
+                               ranges.up.per_expert_bytes);
+                    }
+                    if (ranges.down.per_expert_bytes > 0) {
+                        memcpy(slot + down_off + (size_t)e * ranges.down.per_expert_bytes,
+                               slot + down_off + (size_t)substitute * ranges.down.per_expert_bytes,
+                               ranges.down.per_expert_bytes);
+                    }
+                    b->hotpath_substitutions++;
+                }
+                b->hotpath_substitution_layers++;
+                gate_passes = true;
+                used_substitution = true;
+            }
+        }
+        (void)used_substitution;
 
         void * slot_ptr = gate_passes
             ? moe_layer_stream_get(b->layer_stream, curr_layer)
@@ -1606,6 +1671,56 @@ int main(int argc, char ** argv) {
             }
 #endif
 
+            // ── Sensitivity policy loading (path-agnostic) ─────────────────
+            // Both Mac (layer_stream subset hotpath) and CUDA (expert cache)
+            // use this. Loaded here once into bench_ctx; consumers (Mac
+            // hotpath / CUDA cache_set_substitution_policy) read it from there.
+            if (!substitution_sensitivity_path.empty() && substitution_threshold > 0.0) {
+                FILE * sf = fopen(substitution_sensitivity_path.c_str(), "rb");
+                if (sf) {
+                    fseek(sf, 0, SEEK_END);
+                    long fsz = ftell(sf);
+                    fseek(sf, 0, SEEK_SET);
+                    std::string sbuf(fsz, '\0');
+                    if (fread(sbuf.data(), 1, fsz, sf) == (size_t)fsz) {
+                        bc.sensitivity_per_layer.assign(bc.weights.last_layer() + 1, 0.0f);
+                        size_t pos = 0;
+                        while (pos < sbuf.size()) {
+                            size_t q1 = sbuf.find('"', pos);
+                            if (q1 == std::string::npos) break;
+                            size_t q2 = sbuf.find('"', q1 + 1);
+                            if (q2 == std::string::npos) break;
+                            std::string key = sbuf.substr(q1 + 1, q2 - q1 - 1);
+                            bool numeric_key = !key.empty();
+                            for (char ch : key) if (ch < '0' || ch > '9') { numeric_key = false; break; }
+                            if (!numeric_key) { pos = q2 + 1; continue; }
+                            size_t colon = sbuf.find(':', q2);
+                            if (colon == std::string::npos) break;
+                            size_t val_start = colon + 1;
+                            while (val_start < sbuf.size() &&
+                                   (sbuf[val_start] == ' ' || sbuf[val_start] == '\n' || sbuf[val_start] == '\t')) val_start++;
+                            char * end = nullptr;
+                            double val = strtod(sbuf.c_str() + val_start, &end);
+                            int layer = std::atoi(key.c_str());
+                            if (layer >= 0 && layer < (int)bc.sensitivity_per_layer.size()) {
+                                bc.sensitivity_per_layer[layer] = (float)val;
+                            }
+                            pos = (end ? (size_t)(end - sbuf.c_str()) : val_start + 1);
+                        }
+                        bc.substitution_threshold = (float)substitution_threshold;
+                        bc.substitution_enabled = true;
+                        int n_below = 0;
+                        for (float v : bc.sensitivity_per_layer) if (v > 0.0f && v <= (float)substitution_threshold) n_below++;
+                        LOG_INF("substitution: %d/%d layers below threshold %.3f (loaded sensitivity)\n",
+                                n_below, (int)bc.sensitivity_per_layer.size(), substitution_threshold);
+                    }
+                    fclose(sf);
+                } else {
+                    LOG_WRN("substitution: cannot open sensitivity file %s — substitution DISABLED\n",
+                            substitution_sensitivity_path.c_str());
+                }
+            }
+
 #ifdef MOE_CUDA_EXPERT_CACHE_AVAILABLE
             // ── Persistent CUDA per-expert cache + copy_experts hook ─────
             // When expert_cache_mb > 0, allocate a pool of VRAM and install
@@ -1649,58 +1764,12 @@ int main(int argc, char ** argv) {
                         n_slots, slot_size,
                         ((double)n_slots * slot_size) / (1024.0 * 1024.0));
 
-                // Sensitivity-aware substitution policy (optional).
-                if (!substitution_sensitivity_path.empty() && substitution_threshold > 0.0) {
-                    FILE * sf = fopen(substitution_sensitivity_path.c_str(), "rb");
-                    if (!sf) {
-                        LOG_ERR("substitution: cannot open sensitivity file %s\n",
-                                substitution_sensitivity_path.c_str());
-                        return 1;
-                    }
-                    fseek(sf, 0, SEEK_END);
-                    long fsz = ftell(sf);
-                    fseek(sf, 0, SEEK_SET);
-                    std::string sbuf(fsz, '\0');
-                    if (fread(sbuf.data(), 1, fsz, sf) != (size_t)fsz) {
-                        LOG_ERR("substitution: short read on sensitivity file\n");
-                        fclose(sf);
-                        return 1;
-                    }
-                    fclose(sf);
-                    // Parse a flat JSON object of "<layer_id>": <float> entries.
-                    // Indexed by ABSOLUTE layer id; default 0.0 for absent layers
-                    // (which then never substitute unless threshold >= 0).
-                    std::vector<float> sensitivity(bc.weights.last_layer() + 1, 0.0f);
-                    size_t pos = 0;
-                    while (pos < sbuf.size()) {
-                        size_t q1 = sbuf.find('"', pos);
-                        if (q1 == std::string::npos) break;
-                        size_t q2 = sbuf.find('"', q1 + 1);
-                        if (q2 == std::string::npos) break;
-                        std::string key = sbuf.substr(q1 + 1, q2 - q1 - 1);
-                        bool numeric_key = !key.empty();
-                        for (char ch : key) if (ch < '0' || ch > '9') { numeric_key = false; break; }
-                        if (!numeric_key) { pos = q2 + 1; continue; }
-                        size_t colon = sbuf.find(':', q2);
-                        if (colon == std::string::npos) break;
-                        size_t val_start = colon + 1;
-                        while (val_start < sbuf.size() &&
-                               (sbuf[val_start] == ' ' || sbuf[val_start] == '\n' || sbuf[val_start] == '\t')) val_start++;
-                        char * end = nullptr;
-                        double val = strtod(sbuf.c_str() + val_start, &end);
-                        int layer = std::atoi(key.c_str());
-                        if (layer >= 0 && layer < (int)sensitivity.size()) {
-                            sensitivity[layer] = (float)val;
-                        }
-                        pos = (end ? (size_t)(end - sbuf.c_str()) : val_start + 1);
-                    }
+                // Sensitivity-aware substitution policy (uses bc.sensitivity_per_layer
+                // loaded earlier in the path-agnostic block).
+                if (bc.substitution_enabled) {
                     moe_cuda_expert_cache_set_substitution_policy(
-                        bc.expert_cache, sensitivity.data(),
-                        (int)sensitivity.size(), (float)substitution_threshold);
-                    int n_below = 0;
-                    for (float v : sensitivity) if (v > 0.0f && v <= (float)substitution_threshold) n_below++;
-                    LOG_INF("substitution: %d/%d layers below threshold %.3f (will substitute on miss)\n",
-                            n_below, (int)sensitivity.size(), substitution_threshold);
+                        bc.expert_cache, bc.sensitivity_per_layer.data(),
+                        (int)bc.sensitivity_per_layer.size(), bc.substitution_threshold);
                 }
             }
 #endif
@@ -1984,6 +2053,13 @@ int main(int argc, char ** argv) {
             fprintf(stderr,
                 "[layer_stream hotpath] swaps=%lld fallbacks=%lld swap_rate=%.2f%%\n",
                 (long long)bc.hotpath_swaps, (long long)bc.hotpath_fallbacks, srate);
+            if (bc.substitution_enabled || bc.hotpath_substitutions > 0) {
+                fprintf(stderr,
+                    "[layer_stream hotpath substitution] threshold=%.3f substitutions=%lld over_layers=%lld\n",
+                    bc.substitution_threshold,
+                    (long long)bc.hotpath_substitutions,
+                    (long long)bc.hotpath_substitution_layers);
+            }
         }
         // Restore original mmap pointers BEFORE munmap (cosmetic — destroy is what matters).
         for (int L = 0; L < (int)bc.ffn_gate_exps_tensors.size(); ++L) {
