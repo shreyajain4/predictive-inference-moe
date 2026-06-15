@@ -185,6 +185,10 @@ extern "C" void moe_cuda_expert_cache_destroy(moe_cuda_expert_cache * c) {
 
 // ── Slot allocation + LRU ───────────────────────────────────────────────
 
+// Forward declarations for substitution helpers defined below.
+static void cached_at_insert(moe_cuda_expert_cache * c, int layer, int expert, int kind);
+static void cached_at_erase(moe_cuda_expert_cache * c, int layer, int expert, int kind);
+
 // Find a free slot, or evict LRU. Caller must hold c->mu.
 static int alloc_or_evict_slot(moe_cuda_expert_cache * c) {
     // First scan for a free slot
