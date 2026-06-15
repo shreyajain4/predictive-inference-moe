@@ -92,6 +92,23 @@ int moe_cuda_expert_cache_try_d2d(
     size_t  total_bytes,
     uint64_t * out_uncached_bits);
 
+// Sensitivity-aware substitution policy.
+// When enabled, a cache MISS on a layer with sensitivity ≤ threshold will be
+// "substituted" rather than PCIe'd: the cache finds any cached expert at the
+// same (layer, kind) and uses its bytes in place of the uncached expert.
+// This is an approximate-routing technique — trades quality for latency.
+//
+// sensitivity_per_layer: array indexed by absolute layer id (size n_layers).
+//   Layers with sensitivity > threshold → standard miss (PCIe falls through).
+//   Layers with sensitivity ≤ threshold → substitution attempted; if no cached
+//     expert at (layer, kind) exists, falls back to standard miss.
+// Pass nullptr to DISABLE substitution.
+void moe_cuda_expert_cache_set_substitution_policy(
+    moe_cuda_expert_cache * c,
+    const float * sensitivity_per_layer,
+    int   n_layers,
+    float threshold);
+
 // Hook called by ggml-backend.cpp AFTER a successful PCIe write. Captures
 // the post-conversion bytes into a cache slot (D→D from input_cpy to pool).
 // Allocates a new slot via LRU eviction if necessary.

@@ -1216,6 +1216,13 @@ int main(int argc, char ** argv) {
     int32_t metal_cache_slot_kb = 0;   // 0 = auto from expert offsets
     int32_t layer_stream_buffers = 0;  // 0 = disable layered streaming cache
     int32_t expert_cache_mb = 0;       // 0 = disable persistent CUDA expert cache
+    // ── Sensitivity-aware substitution policy ─────────────────────────────
+    // On a cache miss in a layer with sensitivity ≤ threshold, the cache may
+    // substitute another cached expert at the same (layer, kind). Used to
+    // explore the latency/quality Pareto on DeepSeek-V2-Lite with the
+    // layer-sensitivity data from layer_sensitivity_isolated.json.
+    std::string substitution_sensitivity_path;
+    double      substitution_threshold = 0.0;   // 0 (or negative) → policy disabled
     int32_t layer_stream_layer_kb = 0; // 0 = auto from expert offsets
     std::string layer_stream_mode = "gate";  // "gate" (1 expert gate proj proxy) or "full" (all 128 × 3 projs)
     bool layer_stream_hotpath = false;       // when true: swap ffn_*_exps->data to Metal slot on ffn_moe_topk-L
@@ -1297,6 +1304,20 @@ int main(int argc, char ** argv) {
             // allocates a VRAM pool and installs the copy_experts D→D hook.
             // Predictor's chained-prediction loop prefetches into this cache.
             expert_cache_mb = std::atoi(argv[i + 1]);
+            for (int j = i; j + 2 < argc; ++j) argv[j] = argv[j + 2];
+            argc -= 2; --i;
+        } else if (strcmp(argv[i], "--substitution-sensitivity-file") == 0 && i + 1 < argc) {
+            // Path to per-layer sensitivity JSON, e.g.
+            // moe-advisor/data/sample/layer_sensitivity_isolated.json.
+            // Required to enable substitution.
+            substitution_sensitivity_path = argv[i + 1];
+            for (int j = i; j + 2 < argc; ++j) argv[j] = argv[j + 2];
+            argc -= 2; --i;
+        } else if (strcmp(argv[i], "--substitution-threshold") == 0 && i + 1 < argc) {
+            // Layers with sensitivity ≤ threshold are eligible for substitution
+            // on cache miss. Typical values: 1.5–2.5 (data is normalized to ~1–3
+            // in layer_sensitivity_isolated.json). 0 → disabled.
+            substitution_threshold = std::atof(argv[i + 1]);
             for (int j = i; j + 2 < argc; ++j) argv[j] = argv[j + 2];
             argc -= 2; --i;
         } else if (strcmp(argv[i], "--cache-size") == 0 && i + 1 < argc) {
@@ -1621,6 +1642,60 @@ int main(int argc, char ** argv) {
                 LOG_INF("expert-cache: %d slots × %zu bytes = %.1f MiB; hook installed\n",
                         n_slots, slot_size,
                         ((double)n_slots * slot_size) / (1024.0 * 1024.0));
+
+                // Sensitivity-aware substitution policy (optional).
+                if (!substitution_sensitivity_path.empty() && substitution_threshold > 0.0) {
+                    FILE * sf = fopen(substitution_sensitivity_path.c_str(), "rb");
+                    if (!sf) {
+                        LOG_ERR("substitution: cannot open sensitivity file %s\n",
+                                substitution_sensitivity_path.c_str());
+                        return 1;
+                    }
+                    fseek(sf, 0, SEEK_END);
+                    long fsz = ftell(sf);
+                    fseek(sf, 0, SEEK_SET);
+                    std::string sbuf(fsz, '\0');
+                    if (fread(sbuf.data(), 1, fsz, sf) != (size_t)fsz) {
+                        LOG_ERR("substitution: short read on sensitivity file\n");
+                        fclose(sf);
+                        return 1;
+                    }
+                    fclose(sf);
+                    // Parse a flat JSON object of "<layer_id>": <float> entries.
+                    // Indexed by ABSOLUTE layer id; default 0.0 for absent layers
+                    // (which then never substitute unless threshold >= 0).
+                    std::vector<float> sensitivity(bc.weights.last_layer() + 1, 0.0f);
+                    size_t pos = 0;
+                    while (pos < sbuf.size()) {
+                        size_t q1 = sbuf.find('"', pos);
+                        if (q1 == std::string::npos) break;
+                        size_t q2 = sbuf.find('"', q1 + 1);
+                        if (q2 == std::string::npos) break;
+                        std::string key = sbuf.substr(q1 + 1, q2 - q1 - 1);
+                        bool numeric_key = !key.empty();
+                        for (char ch : key) if (ch < '0' || ch > '9') { numeric_key = false; break; }
+                        if (!numeric_key) { pos = q2 + 1; continue; }
+                        size_t colon = sbuf.find(':', q2);
+                        if (colon == std::string::npos) break;
+                        size_t val_start = colon + 1;
+                        while (val_start < sbuf.size() &&
+                               (sbuf[val_start] == ' ' || sbuf[val_start] == '\n' || sbuf[val_start] == '\t')) val_start++;
+                        char * end = nullptr;
+                        double val = strtod(sbuf.c_str() + val_start, &end);
+                        int layer = std::atoi(key.c_str());
+                        if (layer >= 0 && layer < (int)sensitivity.size()) {
+                            sensitivity[layer] = (float)val;
+                        }
+                        pos = (end ? (size_t)(end - sbuf.c_str()) : val_start + 1);
+                    }
+                    moe_cuda_expert_cache_set_substitution_policy(
+                        bc.expert_cache, sensitivity.data(),
+                        (int)sensitivity.size(), (float)substitution_threshold);
+                    int n_below = 0;
+                    for (float v : sensitivity) if (v > 0.0f && v <= (float)substitution_threshold) n_below++;
+                    LOG_INF("substitution: %d/%d layers below threshold %.3f (will substitute on miss)\n",
+                            n_below, (int)sensitivity.size(), substitution_threshold);
+                }
             }
 #endif
 

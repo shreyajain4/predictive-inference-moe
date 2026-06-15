@@ -83,6 +83,21 @@ struct moe_cuda_expert_cache {
     std::atomic<int64_t> stat_evictions{0};
     std::atomic<int64_t> stat_bytes_prefetched{0};
     std::atomic<int64_t> stat_bytes_d2d_served{0};
+    std::atomic<int64_t> stat_substitutions{0};         // misses satisfied by substituting another cached expert
+    std::atomic<int64_t> stat_substitution_failures{0}; // sensitivity allowed substitution but no cached candidate existed
+
+    // ── Sensitivity-aware substitution policy ────────────────────────────
+    // When sensitivity_per_layer != nullptr: on a miss, if
+    // sensitivity_per_layer[layer] <= sub_threshold, find any cached expert at
+    // (layer, kind) and use its bytes in place of the uncached expert.
+    std::vector<float> sensitivity_per_layer;
+    float sub_threshold = 0.0f;
+    bool  substitution_enabled = false;
+
+    // Secondary index: cached_at[layer*3 + kind] = list of expert_ids currently
+    // cached at that (layer, kind). Maintained on insert/evict for O(1) lookup
+    // of a substitute. Mutex-protected (shares c->mu).
+    std::vector<std::vector<int32_t>> cached_at;   // size = n_layers * 3
 };
 
 // Global handle so the C hook function can find the cache.
@@ -141,6 +156,7 @@ extern "C" moe_cuda_expert_cache * moe_cuda_expert_cache_create(
 
     c->slots.resize(n_slots);
     c->index.reserve((size_t)n_layers * n_experts_per_layer * 3);
+    c->cached_at.resize((size_t)n_layers * 3);   // (layer, kind) → list of expert_ids
 
     CUDA_CHECK(cudaStreamCreateWithFlags(&c->prefetch_stream, cudaStreamNonBlocking));
 
@@ -182,6 +198,7 @@ static int alloc_or_evict_slot(moe_cuda_expert_cache * c) {
     auto & vs = c->slots[victim_slot];
     if (vs.occupied) {
         c->index.erase(vs.key);
+        cached_at_erase(c, vs.key.layer, vs.key.expert, vs.key.kind);
         vs.occupied = false;
         c->stat_evictions.fetch_add(1, std::memory_order_relaxed);
     }
@@ -196,6 +213,60 @@ static void touch_slot(moe_cuda_expert_cache * c, int slot_idx) {
         c->lru_order.push_front(slot_idx);
         s.lru_it = c->lru_order.begin();
     }
+}
+
+// Secondary-index helpers. Caller holds c->mu.
+static inline size_t lk_idx(int layer, int kind) {
+    return (size_t)layer * 3 + (size_t)kind;
+}
+
+static void cached_at_insert(moe_cuda_expert_cache * c, int layer, int expert, int kind) {
+    if (layer < 0 || layer >= c->n_layers || kind < 0 || kind > 2) return;
+    c->cached_at[lk_idx(layer, kind)].push_back((int32_t)expert);
+}
+
+static void cached_at_erase(moe_cuda_expert_cache * c, int layer, int expert, int kind) {
+    if (layer < 0 || layer >= c->n_layers || kind < 0 || kind > 2) return;
+    auto & v = c->cached_at[lk_idx(layer, kind)];
+    for (size_t i = 0; i < v.size(); ++i) {
+        if (v[i] == (int32_t)expert) { v[i] = v.back(); v.pop_back(); return; }
+    }
+}
+
+// Pick any cached expert at (layer, kind), preferring one near `near_expert` if
+// possible (cheap heuristic: nearest in id space tends to be a co-router).
+// Returns -1 if no expert is cached at (layer, kind). Caller holds c->mu.
+static int find_substitute_expert(const moe_cuda_expert_cache * c,
+                                   int layer, int kind, int near_expert) {
+    const auto & v = c->cached_at[lk_idx(layer, kind)];
+    if (v.empty()) return -1;
+    int best = v[0];
+    int best_dist = std::abs(best - near_expert);
+    for (size_t i = 1; i < v.size(); ++i) {
+        int d = std::abs((int)v[i] - near_expert);
+        if (d < best_dist) { best = v[i]; best_dist = d; }
+    }
+    return best;
+}
+
+extern "C" void moe_cuda_expert_cache_set_substitution_policy(
+    moe_cuda_expert_cache * c,
+    const float * sensitivity_per_layer,
+    int   n_layers,
+    float threshold)
+{
+    if (!c) return;
+    std::lock_guard<std::mutex> lk(c->mu);
+    if (!sensitivity_per_layer || n_layers <= 0) {
+        c->substitution_enabled = false;
+        c->sensitivity_per_layer.clear();
+        return;
+    }
+    c->sensitivity_per_layer.assign(sensitivity_per_layer, sensitivity_per_layer + n_layers);
+    c->sub_threshold = threshold;
+    c->substitution_enabled = true;
+    fprintf(stderr, "[moe_cuda_expert_cache] substitution policy ENABLED: threshold=%.3f, n_layers=%d (layers <= threshold will substitute on miss)\n",
+            threshold, n_layers);
 }
 
 // ── Prefetch ────────────────────────────────────────────────────────────
@@ -241,6 +312,7 @@ extern "C" int moe_cuda_expert_cache_prefetch(
         c->lru_order.push_front(slot_idx);
         s.lru_it = c->lru_order.begin();
         c->index[key] = slot_idx;
+        cached_at_insert(c, key.layer, key.expert, key.kind);
     }
     void * dst = c->pool + (size_t)slot_idx * c->slot_size;
     CUDA_CHECK(cudaMemcpyAsync(dst, host_src, nbytes,
@@ -292,22 +364,50 @@ extern "C" int moe_cuda_expert_cache_try_d2d(
     }
 
     // Look up every expert; collect slot indices for cached ones.
+    // On miss, optionally substitute with another cached expert at the same
+    // (layer, kind) when the layer is below the sensitivity threshold.
     int slot_indices[64];
+    bool is_substitute[64] = {false};
     for (int i = 0; i < 64; ++i) slot_indices[i] = -1;
     int n_cached = 0;
+    int n_subbed = 0;
     {
         std::lock_guard<std::mutex> lk(c->mu);
+        const bool sub_enabled = c->substitution_enabled
+            && layer >= 0 && layer < (int)c->sensitivity_per_layer.size()
+            && c->sensitivity_per_layer[layer] <= c->sub_threshold;
+
         for (int32_t i = 0; i < n_experts_in_run; ++i) {
-            expert_key key{layer, first_expert_id + i, kind};
+            const int32_t eid = first_expert_id + i;
+            expert_key key{layer, eid, kind};
             auto it = c->index.find(key);
-            if (it == c->index.end()) continue;   // bit i remains set in caller's mask
-            slot_indices[i] = it->second;
-            touch_slot(c, it->second);
-            n_cached++;
+            if (it != c->index.end()) {
+                slot_indices[i] = it->second;
+                touch_slot(c, it->second);
+                n_cached++;
+                continue;
+            }
+            // True miss. Try substitution if policy allows.
+            if (sub_enabled) {
+                int sub_expert = find_substitute_expert(c, layer, kind, eid);
+                if (sub_expert >= 0) {
+                    expert_key sub_key{layer, sub_expert, kind};
+                    auto sit = c->index.find(sub_key);
+                    if (sit != c->index.end()) {
+                        slot_indices[i] = sit->second;
+                        is_substitute[i] = true;
+                        touch_slot(c, sit->second);
+                        n_subbed++;
+                        continue;
+                    }
+                }
+                c->stat_substitution_failures.fetch_add(1, std::memory_order_relaxed);
+            }
+            // Bit i stays set — caller will PCIe it.
         }
     }
 
-    if (n_cached == 0) {
+    if (n_cached == 0 && n_subbed == 0) {
         c->stat_d2d_partial_miss.fetch_add(1, std::memory_order_relaxed);
         return 0;
     }
@@ -331,8 +431,9 @@ extern "C" int moe_cuda_expert_cache_try_d2d(
 
     *out_uncached_bits &= ~bits_cleared;
     c->stat_bytes_d2d_served.fetch_add((int64_t)bytes_served, std::memory_order_relaxed);
+    if (n_subbed > 0) c->stat_substitutions.fetch_add((int64_t)n_subbed, std::memory_order_relaxed);
 
-    const bool full = (n_cached == n_experts_in_run);
+    const bool full = ((n_cached + n_subbed) == n_experts_in_run);
     if (full) {
         c->stat_d2d_hits.fetch_add(1, std::memory_order_relaxed);
         return 1;
@@ -393,6 +494,7 @@ extern "C" void moe_cuda_expert_cache_snapshot(
             c->lru_order.push_front(slot_idx);
             s.lru_it = c->lru_order.begin();
             c->index[key] = slot_idx;
+            cached_at_insert(c, key.layer, key.expert, key.kind);
         }
         // D→D from input_cpy (already on GPU) to our pool slot.
         void *       dst = c->pool + (size_t)slot_idx * c->slot_size;
@@ -438,13 +540,25 @@ extern "C" void moe_cuda_expert_cache_print_stats(
     moe_cuda_expert_cache_get_stats(c, &s);
     const int64_t total = s.d2d_hits + s.d2d_partial_miss;
     const double hr = total > 0 ? 100.0 * (double)s.d2d_hits / (double)total : 0.0;
+    const int64_t subs = c->stat_substitutions.load(std::memory_order_relaxed);
+    const int64_t sub_fail = c->stat_substitution_failures.load(std::memory_order_relaxed);
     fprintf(stderr,
         "[moe_cuda_expert_cache %s] prefetches=%lld dedup=%lld evictions=%lld "
         "| d2d_hits=%lld d2d_misses=%lld d2d_hit_rate=%.2f%% "
-        "| bytes_prefetched=%.2f MiB bytes_d2d_served=%.2f MiB\n",
+        "| bytes_prefetched=%.2f MiB bytes_d2d_served=%.2f MiB"
+        "%s",
         tag ? tag : "",
         (long long)s.prefetches, (long long)s.prefetches_dedup, (long long)s.evictions,
         (long long)s.d2d_hits, (long long)s.d2d_partial_miss, hr,
         s.bytes_prefetched / (1024.0*1024.0),
-        s.bytes_d2d_served / (1024.0*1024.0));
+        s.bytes_d2d_served / (1024.0*1024.0),
+        "\n");
+    if (c->substitution_enabled || subs > 0 || sub_fail > 0) {
+        fprintf(stderr,
+            "[moe_cuda_expert_cache %s substitution] enabled=%d threshold=%.3f "
+            "substitutions=%lld failures=%lld\n",
+            tag ? tag : "",
+            c->substitution_enabled ? 1 : 0, c->sub_threshold,
+            (long long)subs, (long long)sub_fail);
+    }
 }
