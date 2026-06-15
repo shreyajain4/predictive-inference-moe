@@ -1630,8 +1630,14 @@ int main(int argc, char ** argv) {
                             n_slots, expert_cache_mb);
                     return 1;
                 }
+                // NOTE: pass last_layer()+1, not n_layers. Absolute layer IDs
+                // are used as cache keys (parsed from tensor name "blk.<L>.*").
+                // For DeepSeek-V2-Lite first_layer=1, n_layers=26 → max abs ID
+                // is 26, so the cache must reserve indices for [0..26], i.e.
+                // 27 layer-slots. For Qwen3 first_layer=0, this is identical
+                // to n_layers.
                 bc.expert_cache = moe_cuda_expert_cache_create(
-                    bc.weights.n_layers, bc.weights.num_experts,
+                    bc.weights.last_layer() + 1, bc.weights.num_experts,
                     gate_bytes, up_bytes, down_bytes,
                     n_slots);
                 if (!bc.expert_cache) {
