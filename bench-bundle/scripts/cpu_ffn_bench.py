@@ -91,17 +91,16 @@ def get_expert_weights(t, expert_id: int) -> np.ndarray:
     """
     Extract one expert's weights from a stacked expert tensor.
 
-    GGUF stores ffn_*_exps as shape (n_experts, interm_dim, hidden_dim)
-    or its transpose, depending on the projection. gguf-py's .data property
-    handles dequantization automatically when possible; for Q8_0 it usually
-    returns float32 already.
+    GGUF stores ffn_*_exps with n_experts as the LAST dimension. Example for
+    DeepSeek-V2-Lite Q8_0:
+      blk.L.ffn_gate_exps  shape = (2048, 1408, 64)  = (hidden_dim, interm_dim, n_experts)
+      blk.L.ffn_down_exps  shape = (1408, 2048, 64)  = (interm_dim, hidden_dim, n_experts)
 
-    If .data returns raw bytes (older gguf-py), we dequantize manually.
+    gguf-py's .data auto-dequantizes Q8_0 to float32 when supported; if it
+    returns raw bytes (older versions), we dequantize manually.
     """
     data = t.data
     if data.dtype == np.uint8:
-        # Raw bytes — manual dequant
-        # Tensor shape: (n_experts, dim_a, dim_b)
         shape = tuple(int(s) for s in t.shape)
         n_total = 1
         for s in shape:
@@ -109,10 +108,19 @@ def get_expert_weights(t, expert_id: int) -> np.ndarray:
         dequantized = dequant_q8_0(data, n_total)
         full = dequantized.reshape(shape)
     else:
-        # Already dequantized
         full = data
-    # Take one expert
-    return full[expert_id]
+
+    # Detect which axis is n_experts. We assume it's the smallest dim and
+    # equal across all three projection tensors (gate/up/down). For DS-V2-Lite
+    # it's 64; for Qwen3 it's 128. The last dim is the convention in GGUF.
+    if full.ndim == 3:
+        # Slice the last axis (n_experts is the last dim by GGUF convention)
+        return full[..., expert_id]
+    elif full.ndim == 2:
+        # Single-expert tensor (not stacked) — return as-is
+        return full
+    else:
+        raise ValueError(f"Unexpected expert-tensor ndim={full.ndim}, shape={full.shape}")
 
 
 def main():
