@@ -161,15 +161,35 @@ def main():
 
     print(f"\nExtracting expert {args.expert} weights (this dequantizes Q8_0 → FP32, one-time cost)...")
     t0 = time.perf_counter()
-    gate_w = get_expert_weights(gate_t, args.expert)  # likely (interm_dim, hidden_dim)
+    gate_w = get_expert_weights(gate_t, args.expert)
     up_w = get_expert_weights(up_t, args.expert)
-    down_w = get_expert_weights(down_t, args.expert)  # likely (hidden_dim, interm_dim)
+    down_w = get_expert_weights(down_t, args.expert)
     t_extract = time.perf_counter() - t0
     print(f"Extraction (dequant) took {t_extract*1000:.1f} ms")
+    print(f"  gate_w shape: {gate_w.shape}, dtype: {gate_w.dtype}, contiguous: {gate_w.flags['C_CONTIGUOUS']}")
+    print(f"  up_w   shape: {up_w.shape}, contiguous: {up_w.flags['C_CONTIGUOUS']}")
+    print(f"  down_w shape: {down_w.shape}, contiguous: {down_w.flags['C_CONTIGUOUS']}")
 
-    print(f"  gate_w shape: {gate_w.shape}, dtype: {gate_w.dtype}, size: {gate_w.nbytes/1e6:.2f} MB")
-    print(f"  up_w   shape: {up_w.shape}")
-    print(f"  down_w shape: {down_w.shape}")
+    # CRITICAL: slicing full[..., expert_id] from a 3D tensor gives a non-contiguous
+    # view (stride 64 between columns because n_experts is interleaved). matmul on
+    # non-contiguous data either silently copies per call or thrashes cache. Force
+    # contiguous now so the timed matmul reflects real bandwidth, not stride access.
+    print(f"\nForcing contiguous layout (was strided due to last-axis slice)...")
+    t0 = time.perf_counter()
+    gate_w = np.ascontiguousarray(gate_w)
+    up_w = np.ascontiguousarray(up_w)
+    down_w = np.ascontiguousarray(down_w)
+    t_contig = time.perf_counter() - t0
+    print(f"Contiguous copy took {t_contig*1000:.1f} ms")
+    print(f"  gate_w contiguous now: {gate_w.flags['C_CONTIGUOUS']}, {gate_w.nbytes/1e6:.2f} MB")
+
+    # Print numpy's BLAS info so we know what we're benchmarking
+    try:
+        info = np.show_config(mode="dicts")
+        blas = info.get("Build Dependencies", {}).get("blas", {})
+        print(f"\nNumPy BLAS: name={blas.get('name','?')} version={blas.get('version','?')}")
+    except Exception:
+        pass
 
     # Validate dims: gate and up should produce same intermediate dim from hidden_dim input
     H = args.hidden_dim
