@@ -43,8 +43,43 @@ except ImportError:
     sys.exit("gguf-py not installed. Run: pip install --user --break-system-packages gguf")
 
 
+def dequant_q8_0(raw_bytes: np.ndarray, n_elements: int) -> np.ndarray:
+    """Dequantize Q8_0 GGUF blob to FP32. 32-element blocks: FP16 scale + 32 int8."""
+    assert n_elements % 32 == 0, f"Q8_0 needs n_elements % 32 == 0, got {n_elements}"
+    n_blocks = n_elements // 32
+    expected = n_blocks * 34
+    blob = raw_bytes.view(np.uint8)[:expected].reshape(n_blocks, 34)
+    scales = np.frombuffer(blob[:, :2].tobytes(), dtype=np.float16).astype(np.float32)
+    ints = blob[:, 2:].view(np.int8)
+    return (scales[:, None] * ints.astype(np.float32)).reshape(-1)
+
+
+def get_expert_2d(t, expert_id: int) -> np.ndarray:
+    """Extract one expert's 2D weight slice from a stacked GGUF tensor.
+
+    Handles both auto-dequantized (newer gguf-py → float32) and raw-bytes
+    (older gguf-py → uint8) cases. Slices the LAST axis since GGUF stacks
+    experts with n_experts as the last dim.
+    """
+    data = t.data
+    if data.dtype == np.uint8:
+        # Raw bytes — dequant manually using the full tensor shape
+        shape = tuple(int(s) for s in t.shape)
+        n_total = 1
+        for s in shape:
+            n_total *= s
+        full = dequant_q8_0(data, n_total).reshape(shape)
+    else:
+        full = data
+    if full.ndim == 3:
+        return np.ascontiguousarray(full[..., expert_id])
+    elif full.ndim == 2:
+        return np.ascontiguousarray(full)
+    raise ValueError(f"Unexpected ndim={full.ndim}, shape={full.shape}")
+
+
 def find_and_load_all_experts(gguf_path: str, layer: int, verbose: bool = True):
-    """Load all routed expert weights for one layer into a list of (gate, up, down) tuples."""
+    """Load all routed expert weights for one layer into a list of (gate, up, down) tuples (FP32)."""
     if verbose:
         print(f"Reading {gguf_path}...")
     reader = GGUFReader(gguf_path)
@@ -65,10 +100,12 @@ def find_and_load_all_experts(gguf_path: str, layer: int, verbose: bool = True):
     t0 = time.perf_counter()
     experts = []
     for e in range(n_experts):
-        g = np.ascontiguousarray(gate_t.data[..., e]) if gate_t.data.ndim == 3 else gate_t.data
-        u = np.ascontiguousarray(up_t.data[..., e])   if up_t.data.ndim == 3   else up_t.data
-        d = np.ascontiguousarray(down_t.data[..., e]) if down_t.data.ndim == 3 else down_t.data
+        g = get_expert_2d(gate_t, e)
+        u = get_expert_2d(up_t, e)
+        d = get_expert_2d(down_t, e)
         experts.append((g, u, d))
+        if verbose and e == 0:
+            print(f"  expert 0 shapes: gate {g.shape}, up {u.shape}, down {d.shape} (sanity check)")
     if verbose:
         total_gb = sum(g.nbytes + u.nbytes + d.nbytes for g, u, d in experts) / 1e9
         print(f"Loaded {n_experts} experts ({total_gb:.2f} GB FP32) in {time.perf_counter()-t0:.1f}s")
@@ -85,6 +122,16 @@ GLOBAL_OP_COUNTER = 0
 COUNTER_LOCK = threading.Lock()
 
 
+def _ffn_step(hidden: np.ndarray, g: np.ndarray, u: np.ndarray, d: np.ndarray, H: int) -> np.ndarray:
+    """One expert FFN. Handles both orientations of gate/up/down weight matrices."""
+    # gate / up: produce intermediate from hidden. One axis matches H.
+    gate_out = hidden @ g if g.shape[0] == H else g @ hidden
+    up_out   = hidden @ u if u.shape[0] == H else u @ hidden
+    fused = silu(gate_out) * up_out
+    # down: produce hidden from intermediate. The H-axis is the output side.
+    return d @ fused if d.shape[0] == H else fused @ d
+
+
 def worker_loop(experts, hidden_dim: int, thread_id: int):
     """One worker thread: loops forever, rotating through experts and computing FFN."""
     global GLOBAL_OP_COUNTER
@@ -93,24 +140,22 @@ def worker_loop(experts, hidden_dim: int, thread_id: int):
     hidden = np.random.default_rng(thread_id).standard_normal(hidden_dim, dtype=np.float32)
 
     local_count = 0
-    BATCH = 64  # flush counter every N ops to reduce lock contention
+    BATCH = 64
 
-    while not STOP_FLAG.is_set():
-        # Rotate through experts
-        e = (thread_id * 7919 + local_count) % n_experts  # 7919 prime → spread across experts
-        g, u, d = experts[e]
-        # FFN: down(silu(g @ x) * (u @ x))
-        # The orientation: gate/up are (hidden_dim, interm_dim) → use hidden @ W
-        gate_out = hidden @ g if g.shape[0] == hidden_dim else g @ hidden
-        up_out   = hidden @ u if u.shape[0] == hidden_dim else u @ hidden
-        fused = silu(gate_out) * up_out
-        # down is (interm_dim, hidden_dim) → fused @ d
-        _ = fused @ d if d.shape[0] != hidden_dim else d @ fused
-
-        local_count += 1
-        if local_count % BATCH == 0:
-            with COUNTER_LOCK:
-                GLOBAL_OP_COUNTER += BATCH
+    try:
+        while not STOP_FLAG.is_set():
+            e = (thread_id * 7919 + local_count) % n_experts
+            g, u, d = experts[e]
+            _ = _ffn_step(hidden, g, u, d, hidden_dim)
+            local_count += 1
+            if local_count % BATCH == 0:
+                with COUNTER_LOCK:
+                    GLOBAL_OP_COUNTER += BATCH
+    except Exception as ex:
+        # Print loudly so we know if all threads silently died
+        print(f"!!! Thread {thread_id} died: {type(ex).__name__}: {ex}", file=sys.stderr)
+        STOP_FLAG.set()
+        raise
 
 
 def main():
