@@ -280,39 +280,57 @@ def main():
     # For projections downstream, use the COLD measurement
     per_expert_us = per_expert_cold_us
 
-    # --- Project to top-K case ---
-    topk_us = per_expert_us * args.top_k
-    print(f"\n=== Projected top-{args.top_k} layer cost ===")
-    print(f"  Sequential CPU FFN:     {topk_us:.1f} μs ({topk_us/1000:.2f} ms) per layer")
-    print(f"  vs PCIe gen4 (9 MB ea): {9000 / 13 * args.top_k:.0f} μs (one-way transfer, K experts)")
-    print(f"  vs measured snap PCIe:  {0.46 * args.top_k * 9000 / 13:.0f} μs (at m=0.46)")
+    # --- Three hybrid scenarios with explicit assumptions ---
+    # Scenario A: FP32 numpy single-thread (what THIS bench measures directly)
+    # Scenario B: Q8 native single-thread (real ggml-cpu Q8 matmul: 4× less memory traffic)
+    # Scenario C: Q8 native multi-thread bandwidth-limited (parallel misses share DRAM)
+    print(f"\n=== Three hybrid projection scenarios ===")
+    print(f"All assume cache hit rate h=0.54 (measured DS Q8 at 5 GB cache).")
+    print(f"Numbers in parens: per-token throughput including ~50 ms attention overhead.\n")
 
-    # --- Project to whole-model ---
-    # DS-V2-Lite has 26 MoE layers (layer 0 is dense)
-    n_moe_layers = 26
-    full_layer_us = per_expert_us * args.top_k
-    total_per_token_ms = full_layer_us * n_moe_layers / 1000
-    print(f"\n=== Projected whole-model FFN cost (if all CPU, no overlap) ===")
-    print(f"  {n_moe_layers} MoE layers × top-{args.top_k}: {total_per_token_ms:.1f} ms FFN per token")
-    print(f"  Measured CPU baseline:  ~93 ms/token total (incl. attention)")
-    print(f"  → FFN share of total:   {total_per_token_ms / 93 * 100:.0f}%")
-
-    # --- The hybrid hypothesis ---
-    print(f"\n=== Hybrid (snap-hit on GPU || miss on CPU) projection ===")
-    hit_rate = 0.54  # measured DS Q8 at 5 GB cache
+    hit_rate = 0.54
     miss_rate = 1 - hit_rate
-    gpu_per_layer_us = 65  # measured: K × E / 450 GB/s
-    cpu_miss_us = per_expert_us * args.top_k * miss_rate
-    hybrid_per_layer_us = max(gpu_per_layer_us, cpu_miss_us)
-    hybrid_per_token_ms = hybrid_per_layer_us * n_moe_layers / 1000
-    print(f"  GPU hit path (parallel):   {gpu_per_layer_us:.0f} μs/layer")
-    print(f"  CPU miss path (parallel):  {cpu_miss_us:.0f} μs/layer  (at m={miss_rate:.2f})")
-    print(f"  Hybrid per layer:          {hybrid_per_layer_us:.0f} μs (max of the two)")
-    print(f"  Hybrid per-token FFN:      {hybrid_per_token_ms:.1f} ms")
-    print(f"  + attention overhead:      ~50 ms (measured)")
-    print(f"  → projected throughput:    ~{1000 / (hybrid_per_token_ms + 50):.1f} t/s")
-    print(f"  vs vanilla -ngl 12:        15.34 t/s (measured)")
-    print(f"  vs current snapshot:       10.32 t/s (measured)")
+    gpu_per_layer_us = 65          # measured: K × E_Q8 / GPU_BW @ 450 GB/s
+    n_moe_layers = 26
+    attn_ms = 50
+
+    def project_hybrid(cpu_per_expert_us: float, label: str, assumption: str):
+        cpu_layer_us = cpu_per_expert_us * args.top_k * miss_rate  # sequential miss processing
+        hybrid_layer_us = max(gpu_per_layer_us, cpu_layer_us)
+        hybrid_ms = hybrid_layer_us * n_moe_layers / 1000
+        tok_per_sec = 1000 / (hybrid_ms + attn_ms)
+        print(f"  [{label}]  per-expert {cpu_per_expert_us:>6.0f} μs  →  "
+              f"hybrid {hybrid_layer_us:>5.0f} μs/layer  ({tok_per_sec:>4.1f} t/s)")
+        print(f"    └─ {assumption}")
+        return tok_per_sec
+
+    # A — measured FP32 numpy, single-thread (THIS bench)
+    project_hybrid(
+        per_expert_us, "A: FP32 numpy",
+        "what this script measured. Floor: FP32 inflates Q8 memory traffic 4×.")
+
+    # B — Q8 native single-thread (theoretical, 4× faster on memory)
+    q8_native_per_expert = per_expert_us / 4
+    project_hybrid(
+        q8_native_per_expert, "B: Q8 native",
+        "real ggml-cpu Q8 matmul reads 1/4 the bytes (3 MB vs 11.5 MB per projection).")
+
+    # C — Q8 native + multi-thread bandwidth-bound (aggregate DRAM 50 GB/s, top-K parallel)
+    # Each missed expert handled by its own thread; total bytes = m × K × 9 MB; bandwidth shared.
+    DRAM_AGG_GBS = 50.0
+    cpu_layer_us_C = miss_rate * args.top_k * 9.0 / DRAM_AGG_GBS * 1000  # ms then μs
+    hybrid_layer_us_C = max(gpu_per_layer_us, cpu_layer_us_C)
+    hybrid_ms_C = hybrid_layer_us_C * n_moe_layers / 1000
+    tok_C = 1000 / (hybrid_ms_C + attn_ms)
+    print(f"  [C: Q8 multi-thread]  CPU bytes/layer = m×K×9MB = {miss_rate * args.top_k * 9:.1f} MB  →  "
+          f"hybrid {hybrid_layer_us_C:>5.0f} μs/layer  ({tok_C:>4.1f} t/s)")
+    print(f"    └─ {DRAM_AGG_GBS:.0f} GB/s aggregate DRAM (DDR4 dual-channel), parallel across cores.")
+
+    print(f"\n  baselines for comparison:")
+    print(f"    vanilla -ngl 12 (measured):  15.34 t/s")
+    print(f"    current snapshot (measured): 10.32 t/s")
+    print(f"\n  bottom line: integration of Q8 native CPU FFN would be needed to test scenario B/C.")
+    print(f"  scenario A is the floor and isn't competitive. Scenario C would beat vanilla at Q8.")
 
 
 if __name__ == "__main__":
