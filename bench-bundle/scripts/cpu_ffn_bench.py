@@ -213,53 +213,72 @@ def main():
     rng = np.random.default_rng(42)
     hidden = rng.standard_normal(H, dtype=np.float32)
 
-    # --- Benchmark single-expert FFN ---
-    print(f"\nWarming up...")
-    for _ in range(10):
+    def ffn_step(g_w, u_w, d_w):
+        """One FFN pass: silu(g@x) * (u@x) → d @ result. Returns the output."""
         if gate_orient == "standard":
-            g = gate_w @ hidden
-            u = up_w @ hidden
+            g = g_w @ hidden
+            u = u_w @ hidden
         else:
-            g = hidden @ gate_w
-            u = hidden @ up_w
+            g = hidden @ g_w
+            u = hidden @ u_w
         f = silu(g) * u
-        if down_w.shape[0] == H:
-            out = down_w @ f
-        else:
-            out = f @ down_w
-    _ = out.sum()  # force completion
+        return d_w @ f if d_w.shape[0] == H else f @ d_w
 
-    print(f"Timing single-expert FFN over {args.n_trials} trials...")
+    # --- Mode 1: WARM cache (same expert every trial) ---
+    print(f"\n=== Mode 1: WARM cache (same expert repeated, hits L3) ===")
+    print(f"Warming up...")
+    for _ in range(10):
+        out = ffn_step(gate_w, up_w, down_w)
+    _ = out.sum()
+
+    print(f"Timing single-expert FFN over {args.n_trials} trials (warm)...")
     start = time.perf_counter()
     for _ in range(args.n_trials):
-        if gate_orient == "standard":
-            g = gate_w @ hidden
-            u = up_w @ hidden
-        else:
-            g = hidden @ gate_w
-            u = hidden @ up_w
-        f = silu(g) * u
-        if down_w.shape[0] == H:
-            out = down_w @ f
-        else:
-            out = f @ down_w
-    elapsed = time.perf_counter() - start
-    per_expert_us = elapsed / args.n_trials * 1e6
+        out = ffn_step(gate_w, up_w, down_w)
+    elapsed_warm = time.perf_counter() - start
+    per_expert_warm_us = elapsed_warm / args.n_trials * 1e6
 
     expert_bytes_fp32 = gate_w.nbytes + up_w.nbytes + down_w.nbytes
-    # Note: we time FP32 matmul on dequantized weights. Real bench-aligned cost
-    # would be Q8 dequant + INT8/FP32 matmul. For bandwidth comparison, the FP32
-    # number gives us the upper bound (more memory traffic per op).
-    # In real impl, you'd use ggml's Q8 CPU matmul which reads Q8 directly.
-    expert_bytes_q8 = expert_bytes_fp32 // 4  # Q8 is ~4× more compact than FP32
-    bw_fp32_gbs = expert_bytes_fp32 / per_expert_us * 1e3 / 1e9
-    bw_q8_proj_gbs = expert_bytes_q8 / per_expert_us * 1e3 / 1e9
+    expert_bytes_q8 = expert_bytes_fp32 // 4
+    # Correct GB/s: bytes / μs / 1e3 (since 1 GB = 1e9 B and 1 s = 1e6 μs)
+    bw_warm_fp32 = expert_bytes_fp32 / per_expert_warm_us / 1e3
+    bw_warm_q8 = expert_bytes_q8 / per_expert_warm_us / 1e3
+    print(f"  per-expert time (warm):  {per_expert_warm_us:.1f} μs")
+    print(f"  FP32 weight bytes:       {expert_bytes_fp32/1e6:.2f} MB")
+    print(f"  achieved FP32 bw (warm): {bw_warm_fp32:.1f} GB/s   (hitting L3 — overestimates)")
+    print(f"  equivalent Q8 bw:        {bw_warm_q8:.1f} GB/s")
 
-    print(f"\n=== Single-expert FFN result ===")
-    print(f"  per-expert time:        {per_expert_us:.1f} μs")
-    print(f"  FP32 weight bytes:      {expert_bytes_fp32/1e6:.2f} MB")
-    print(f"  achieved FP32 bw:       {bw_fp32_gbs:.1f} GB/s")
-    print(f"  equivalent Q8 bw:       {bw_q8_proj_gbs:.1f} GB/s  (what real bench would touch)")
+    # --- Mode 2: COLD cache (rotate through all experts → forces DRAM reads) ---
+    n_experts = int(gate_t.shape[-1])
+    print(f"\n=== Mode 2: COLD cache (rotate {n_experts} experts → DRAM-bound) ===")
+    print(f"Loading all {n_experts} experts' weights to RAM (this takes ~{n_experts*3*0.7:.0f}s for dequant)...")
+    t0 = time.perf_counter()
+    all_gate = [np.ascontiguousarray(get_expert_weights(gate_t, e)) for e in range(n_experts)]
+    all_up   = [np.ascontiguousarray(get_expert_weights(up_t,   e)) for e in range(n_experts)]
+    all_down = [np.ascontiguousarray(get_expert_weights(down_t, e)) for e in range(n_experts)]
+    total_gb = sum(w.nbytes for w in all_gate + all_up + all_down) / 1e9
+    print(f"Loaded all experts in {time.perf_counter()-t0:.1f}s. Total FP32 working set: {total_gb:.2f} GB (way bigger than L3)")
+
+    # Warm up by touching first few
+    for e in range(min(5, n_experts)):
+        _ = ffn_step(all_gate[e], all_up[e], all_down[e])
+
+    print(f"Timing FFN rotating through {n_experts} experts over {args.n_trials} trials (cold)...")
+    start = time.perf_counter()
+    for i in range(args.n_trials):
+        e = i % n_experts
+        out = ffn_step(all_gate[e], all_up[e], all_down[e])
+    elapsed_cold = time.perf_counter() - start
+    per_expert_cold_us = elapsed_cold / args.n_trials * 1e6
+
+    bw_cold_fp32 = expert_bytes_fp32 / per_expert_cold_us / 1e3
+    bw_cold_q8 = expert_bytes_q8 / per_expert_cold_us / 1e3
+    print(f"  per-expert time (cold):  {per_expert_cold_us:.1f} μs")
+    print(f"  achieved FP32 bw (cold): {bw_cold_fp32:.1f} GB/s   (DRAM-bound, this is the real number)")
+    print(f"  equivalent Q8 bw:        {bw_cold_q8:.1f} GB/s")
+
+    # For projections downstream, use the COLD measurement
+    per_expert_us = per_expert_cold_us
 
     # --- Project to top-K case ---
     topk_us = per_expert_us * args.top_k
