@@ -98,6 +98,24 @@ Regimes where it can't:
 
 The 40 GB A100 + Mixtral 8x22B Q4 case (~80 GB model) is borderline — ngl_auto fits ~half, snap+cache competes with the CPU half's traffic. Worth measuring once if we want a tighter answer; otherwise the negative result here generalizes.
 
+## How does this square with MoE-Infinity and related work showing 4-7× speedups?
+
+Natural question: if cache+prefetch is structurally dominated by `ngl_auto` here, how do MoE-Infinity (Xue et al. 2024), FluxMoE, DuoServe-MoE, OD-MoE etc. report large speedups? They're in different regimes AND compare against weaker baselines.
+
+**1. Different hardware.** Server A100/H100 with PCIe gen4-5 (32-64 GB/s) and DDR5 (50+ GB/s). The per-expert math reverses — PCIe + GPU compute is faster than CPU compute. On consumer gen4 + DDR4/5 (RTX 3070), it's the opposite. OD-MoE uses 10-node distributed setups where the PCIe-to-host-CPU bottleneck doesn't apply at all.
+
+**2. Different model regimes.** They target Switch-XL, GLaM, Mixtral 8x22B Q8 — models that don't fit in any productive partial offload. The auto-fit baseline degenerates because there's no productive `ngl`. Forced-offload+cache becomes the only meaningful comparison.
+
+**3. Different baselines** (the key one). They compare against DeepSpeed-MII or static-partition (≈ our `offload_no_cache`) — both pay full PCIe per token with no cache. They don't compare against llama.cpp's `common_fit_params` auto-fit. **Our `snap` IS measurably better than `offload_no_cache` (+29%) — same shape of win as their reported numbers, just smaller magnitude.** We just additionally measured the auto-fit baseline that dominates both.
+
+**4. Different metrics.** Many MoE serving papers report (a) prefill throughput, (b) batched serving latency at batch=8/16/32+, or (c) TTFT — not single-stream batch=1 decode tok/s. At higher batch, PCIe amortizes across many tokens reusing the same expert. Batch=1 decode is the most pessimistic metric for cache mechanisms.
+
+**The honest takeaway.** This negative result doesn't refute MoE-Infinity — it identifies a regime boundary they didn't explore. The publishable framing:
+
+> "MoE expert caching mechanisms (snap, predictor prefetch, warm-from-history) deliver real benefits in server-class regimes where partial offload doesn't fit (per MoE-Infinity, FluxMoE et al.). On consumer GPUs with adaptive partial-offload (llama.cpp's `common_fit_params`), the layer-level placement strategy structurally dominates at batch=1 decode. We characterize the regime boundary and quantify the ordering: ngl_auto > cpu_moe > snap+cache > offload_no_cache > raw forced-offload."
+
+If you wanted to reproduce one of those papers' positive results in our infrastructure, the closest reachable regime would be: 40 GB A100 + Mixtral 8x22B Q8 (~140 GB, ngl_auto can fit only ~28% of layers) + batch ≥ 4. That's where the math flips back toward favoring snap+cache.
+
 **Warm-from-history adds +0.53 t/s (+4.8%) over snapshot alone, paired across 29 prompts.** Real but small effect. Hit-rate is nearly identical between snap and snap+warm (35.78 vs 35.75%) — the warm-loaded experts don't show up as d2d_hits, yet per-prompt tok/s is consistently higher. The warm-up's `drain()` finishes before the decode timer starts, so H→D overhead is amortized and the cache state at decode-start is slightly different (different evictions during warm-up → different cold-start configuration). Single-prompt smoke showed +0.4 t/s at the edge of noise; the paired 29-prompt result confirms the direction with much tighter variance.
 
 **Snapshot is real per-prompt** (+4.8 t/s over raw forced-offload in single-prompt smoke). Aggregate hit rate is lower (35.75% vs 61.5%) because each fresh prompt routes to new experts — snapshot has to refill from scratch every iteration.
