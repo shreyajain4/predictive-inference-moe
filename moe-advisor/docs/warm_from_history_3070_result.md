@@ -13,7 +13,7 @@ User-history-based pre-population of the snapshot expert cache. 100 prompts from
 - **Warm profile:** K=32 per layer × 48 layers = 1536 entries × 3 kinds = 4608 slot loads.
 - **Forcing PCIe traffic:** `-ngl 99 --override-tensor exps=CPU GGML_OP_OFFLOAD_MIN_BATCH=1`. Without `MIN_BATCH=1` the MoE op stays on CPU and `copy_experts` never fires.
 
-## Result
+## Result — single-prompt smoke (32-token decode, n=1 prompt)
 
 | Config | tok/s | d2d_hit_rate | bytes via cache |
 |---|---|---|---|
@@ -23,9 +23,20 @@ User-history-based pre-population of the snapshot expert cache. 100 prompts from
 | Snapshot alone | 13.81 | 61.5% | 22.8 GB |
 | Forced offload, no cache (memory) | ~9.0 | — | 36.6 GB PCIe |
 
-**Snapshot is real:** +4.8 t/s over raw forced-offload, 22.8 GB served D→D instead of PCIe.
+## Result — aggregate (29 paired prompts, 8-token decode each)
 
-**Warm-from-history added +0.4 t/s** (within noise). The cache stats show *identical* `d2d_hits=23181` and `bytes_d2d_served=22834 MiB` in both runs.
+| Config | mean tok/s | median | min | max | hit rate |
+|---|---|---|---|---|---|
+| ngl=12 | **21.31** | 21.38 | 19.37 | 21.56 | n/a |
+| CPU MoE | 16.77 | 16.76 | 16.65 | 16.87 | 0% |
+| Snapshot + warm-from-history (K=32) | 11.59 | 11.67 | 9.73 | 13.34 | 35.78% |
+| Snapshot alone | 11.06 | 11.10 | 9.31 | 12.95 | 35.75% |
+
+**Warm-from-history adds +0.53 t/s (+4.8%) over snapshot alone, paired across 29 prompts.** Real but small effect. Hit-rate is nearly identical between snap and snap+warm (35.78 vs 35.75%) — the warm-loaded experts don't show up as d2d_hits, yet per-prompt tok/s is consistently higher. The warm-up's `drain()` finishes before the decode timer starts, so H→D overhead is amortized and the cache state at decode-start is slightly different (different evictions during warm-up → different cold-start configuration). Single-prompt smoke showed +0.4 t/s at the edge of noise; the paired 29-prompt result confirms the direction with much tighter variance.
+
+**Snapshot is real per-prompt** (+4.8 t/s over raw forced-offload in single-prompt smoke). Aggregate hit rate is lower (35.75% vs 61.5%) because each fresh prompt routes to new experts — snapshot has to refill from scratch every iteration.
+
+**But the entire snapshot regime loses on this hardware.** Mean snap+warm (11.59) < CPU MoE (16.77) < ngl=12 (21.31). Forcing experts to GPU and then caching them is *slower* than just leaving MoE on CPU. Partial offload (ngl=12) dominates by ~10 t/s.
 
 ## Root cause for the null warm result
 
