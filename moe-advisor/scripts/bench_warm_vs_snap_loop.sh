@@ -90,29 +90,7 @@ done < "$TESTSET"
 
 echo ""
 echo "=== AGGREGATES ==="
-for cfg in snap_only snap_warm ngl12 cpu_moe; do
-  echo "--- $cfg ---"
-  awk -F'\t' '
-    /d2d_hits=/ {
-      match($2, /d2d_hits=([0-9]+)/, a); h += a[1]
-      match($2, /d2d_misses=([0-9]+)/, b); m += b[1]
-      match($2, /bytes_d2d_served=([0-9.]+)/, c); d2d_mb += c[1]
-      match($2, /bytes_prefetched=([0-9.]+)/, e); pre_mb += e[1]
-      cache_runs++
-    }
-    /decode:/ {
-      match($3, /\(([0-9.]+) tok/, t); tps_sum += t[1]; tps_n++
-    }
-    END {
-      if (cache_runs > 0) {
-        printf "cache: runs=%d  hits=%d  miss=%d  hit_rate=%.2f%%\n", cache_runs, h, m, (h+m>0?100*h/(h+m):0)
-        printf "       bytes_prefetched=%.0f MiB  bytes_d2d_served=%.0f MiB\n", pre_mb, d2d_mb
-      } else {
-        printf "cache: (not used in this config)\n"
-      }
-      if (tps_n > 0) printf "mean tok/s = %.2f  (over %d runs)\n", tps_sum/tps_n, tps_n
-    }
-  ' "$OUTDIR/${cfg}.tsv"
-done
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+python3 "$SCRIPT_DIR/aggregate_warm_vs_snap.py" "$OUTDIR"
 echo ""
 echo "raw logs and per-run rows are under: $OUTDIR"
