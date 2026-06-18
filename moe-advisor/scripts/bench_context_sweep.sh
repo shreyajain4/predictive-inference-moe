@@ -118,15 +118,28 @@ done
 
 # Pick which TSV lines to use as prompts.
 #   PROMPT_LINES="3 7 12"  → use those exact line numbers
-#   N_PROMPTS=1 (default)  → pick the LONGEST prompt (most "interesting")
-#   N_PROMPTS=N            → first N lines
+#   N_PROMPTS=1 (default)  → pick the longest prompt that fits in the
+#                            smallest context (avoids context overflow).
+#                            Smallest context's prefill budget is ~75% of
+#                            n_ctx (leaving room for decode + chat
+#                            template). Char/token ratio ≈ 3.5, so
+#                            char limit ≈ ctx_min * 0.75 * 3.5.
+#   N_PROMPTS=N            → first N lines (paired aggregate)
 if [ -n "$PROMPT_LINES" ]; then
   LINES="$PROMPT_LINES"
   echo "using PROMPT_LINES=$LINES"
 elif [ "$N_PROMPTS" = "1" ]; then
-  LINES=$(awk -F'\t' '{print length($2)"\t"NR}' "$TESTSET" | sort -rn | head -1 | cut -f2)
+  CTX_MIN=$(echo "$CONTEXTS" | tr ' ' '\n' | sort -n | head -1)
+  CHAR_LIMIT=$(( CTX_MIN * 75 / 100 * 35 / 10 ))
+  LINES=$(awk -F'\t' -v lim="$CHAR_LIMIT" '
+    length($2) <= lim { print length($2)"\t"NR }
+  ' "$TESTSET" | sort -rn | head -1 | cut -f2)
+  if [ -z "$LINES" ]; then
+    echo "ERROR: no prompt fits in CHAR_LIMIT=$CHAR_LIMIT (CTX_MIN=$CTX_MIN)"
+    exit 1
+  fi
   PLEN=$(awk -F'\t' -v ln=$LINES 'NR==ln {print length($2)}' "$TESTSET")
-  echo "single-prompt mode: picked line $LINES (length=$PLEN chars) as longest"
+  echo "single-prompt mode: picked line $LINES (length=$PLEN chars, limit=$CHAR_LIMIT for CTX_MIN=$CTX_MIN)"
 else
   LINES=$(seq 1 "$N_PROMPTS")
 fi
