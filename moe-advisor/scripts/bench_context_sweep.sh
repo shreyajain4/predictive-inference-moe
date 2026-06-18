@@ -16,11 +16,11 @@
 #   E. snap_warm            snap + warm-from-history (K=32)
 #   F. snap_warm_pred       snap + warm + predictor
 #
-# Cache MB per context — baselined at 3500 MiB (proven safe with c=4096
-# from earlier runs), shrunk linearly with extra KV beyond that. Floor 1500.
-#   c=4096:  3500 MiB    c=16384:  2324 MiB
-#   c=8192:  3108 MiB    c=32768:  1500 MiB (floor)
-#                        c=65536:  1500 MiB (floor)
+# Cache MB per context — direct table (graph scratch grows with c so
+# a simple "minus KV" formula doesn't capture the overhead):
+#   c=4096:  3500 MiB    c=16384: 2200 MiB
+#   c=8192:  3000 MiB    c=32768:  600 MiB
+#                        c=65536:  150 MiB (KV alone = 6 GB; minimal cache)
 #
 # Usage:
 #   bash scripts/bench_context_sweep.sh [N_PROMPTS] "ctx1 ctx2 ..."
@@ -43,18 +43,35 @@ CONTEXTS=${2:-"4096 8192 16384 32768 65536"}
 : "${BENCH:=$HOME/llama.cpp/build/bin/llama-moe-predictor-bench}"
 : "${N_TOKENS:=8}"
 
-# Cache size baselined at 3500 MiB (known-safe with c=4096 from earlier
-# runs), reduced linearly with extra KV beyond c=4096. Floored at 1500.
-# Tried going larger at small c before (5500) — OOM'd because lm_head +
-# embed + per-layer attention + driver overhead ate more than I assumed.
+# Cache size per context. Reverse-engineered from observations:
+# offload_no_cache works at c=32k → KV + non-expert + driver + graph
+# ≈ 5 GB at c=32k. Cache must squeeze into 8 GB - 5 GB = ~3 GB at c=32k
+# max, and the graph scratch grows with c, so cache must shrink faster
+# than just (3500 - extra_kv).
+#
+# Direct table (validated values where known, conservative elsewhere):
+#   c=4096:  3500 MiB  (known-safe)
+#   c=8192:  3000 MiB
+#   c=16384: 2200 MiB
+#   c=32768:  600 MiB  (snap@1500 OOMs; offload@no-cache works)
+#   c=65536:  150 MiB  (KV alone is 6 GB; minimal cache or skip)
 cache_mb_for_ctx() {
-  local ctx=$1
-  local kv_mb=$(( ctx * 98 / 1024 ))
-  local baseline_kv=$(( 4096 * 98 / 1024 ))   # 392 MiB at c=4096
-  local cache=$(( 3500 - (kv_mb - baseline_kv) ))
-  if [ $cache -lt 1500 ]; then cache=1500; fi
-  if [ $cache -gt 3500 ]; then cache=3500; fi
-  echo $cache
+  case $1 in
+    4096)  echo 3500 ;;
+    8192)  echo 3000 ;;
+    16384) echo 2200 ;;
+    32768) echo  600 ;;
+    65536) echo  150 ;;
+    *)
+      # Fallback formula for unlisted contexts.
+      local ctx=$1
+      local kv_mb=$(( ctx * 98 / 1024 ))
+      local cache=$(( 8192 - 5000 - kv_mb ))
+      if [ $cache -lt 100 ]; then cache=100; fi
+      if [ $cache -gt 3500 ]; then cache=3500; fi
+      echo $cache
+      ;;
+  esac
 }
 
 OUTDIR=/tmp/ctx_sweep_$(date +%s)
