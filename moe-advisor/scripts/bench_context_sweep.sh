@@ -22,14 +22,15 @@
 #
 # Usage:
 #   bash scripts/bench_context_sweep.sh [N_PROMPTS] "ctx1 ctx2 ..."
-# Defaults: N_PROMPTS=10  contexts="1024 2048 4096 8192 16384 32768"
+# Defaults: N_PROMPTS=1  contexts="4096 8192 16384 32768 65536"
 #
-# Smoke first: bash scripts/bench_context_sweep.sh 2 "1024 32768"
-# Full: 5 × 6 × 10 = 300 runs × ~25s ≈ 2 hours at defaults.
+# Single-prompt mode (default): 5 configs × 5 contexts = 25 runs ≈ 12 min.
+# Noisy but quick — use for sanity / direction-finding.
+# For real measurement, pass N=10 (≈ 2 hours).
 
 set -e
 
-N_PROMPTS=${1:-10}
+N_PROMPTS=${1:-1}
 CONTEXTS=${2:-"4096 8192 16384 32768 65536"}
 
 : "${MODEL:=/home/shreya/models/Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf}"
