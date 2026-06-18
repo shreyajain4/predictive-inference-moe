@@ -50,8 +50,10 @@
 #include <cstring>
 #include <deque>
 #include <fcntl.h>     // open
+#include <fstream>
 #include <map>
 #include <mutex>
+#include <sstream>
 #include <string>
 #include <sys/mman.h>  // mmap, posix_madvise, MADV_*
 #include <sys/stat.h>  // fstat
@@ -1281,6 +1283,13 @@ int main(int argc, char ** argv) {
     int32_t metal_cache_slot_kb = 0;   // 0 = auto from expert offsets
     int32_t layer_stream_buffers = 0;  // 0 = disable layered streaming cache
     int32_t expert_cache_mb = 0;       // 0 = disable persistent CUDA expert cache
+    // Warm-from-history: path to flat text profile produced by
+    // scripts/npy_to_warm_profile.py. Each line: "<layer> <expert> <hits>".
+    // After moe_cuda_expert_cache_create + install_hook, the listed
+    // (layer, expert) tuples are H→D prefetched into the VRAM pool (all 3
+    // kinds: gate/up/down) before the first decode call. First-token PCIe
+    // is largely served from cache for the most-likely experts.
+    std::string warm_snapshot_profile;
     // ── Sensitivity-aware substitution policy ─────────────────────────────
     // On a cache miss in a layer with sensitivity ≤ threshold, the cache may
     // substitute another cached expert at the same (layer, kind). Used to
@@ -1369,6 +1378,10 @@ int main(int argc, char ** argv) {
             // allocates a VRAM pool and installs the copy_experts D→D hook.
             // Predictor's chained-prediction loop prefetches into this cache.
             expert_cache_mb = std::atoi(argv[i + 1]);
+            for (int j = i; j + 2 < argc; ++j) argv[j] = argv[j + 2];
+            argc -= 2; --i;
+        } else if (strcmp(argv[i], "--warm-snapshot-profile") == 0 && i + 1 < argc) {
+            warm_snapshot_profile = argv[i + 1];
             for (int j = i; j + 2 < argc; ++j) argv[j] = argv[j + 2];
             argc -= 2; --i;
         } else if (strcmp(argv[i], "--substitution-sensitivity-file") == 0 && i + 1 < argc) {
@@ -1770,6 +1783,66 @@ int main(int argc, char ** argv) {
                     moe_cuda_expert_cache_set_substitution_policy(
                         bc.expert_cache, bc.sensitivity_per_layer.data(),
                         (int)bc.sensitivity_per_layer.size(), bc.substitution_threshold);
+                }
+
+                // ── Warm-from-history: pre-populate the VRAM pool ──
+                // For each (layer, expert) in the txt profile produced by
+                // scripts/npy_to_warm_profile.py, H→D copy gate/up/down into
+                // the pool before any decode runs. Reuses bc.expert_ranges
+                // (must be populated via --expert-offsets <json>).
+                if (!warm_snapshot_profile.empty()) {
+                    if (bc.expert_ranges.empty()) {
+                        LOG_ERR("[warm-snapshot] --warm-snapshot-profile requires --expert-offsets <json>\n");
+                        return 1;
+                    }
+                    std::ifstream wf(warm_snapshot_profile);
+                    if (!wf.is_open()) {
+                        LOG_ERR("[warm-snapshot] cannot open %s\n", warm_snapshot_profile.c_str());
+                        return 1;
+                    }
+                    size_t lines_parsed = 0, lines_bad = 0;
+                    size_t experts_prefetched = 0;
+                    std::string line;
+                    while (std::getline(wf, line)) {
+                        if (line.empty() || line[0] == '#') continue;
+                        std::istringstream iss(line);
+                        int L = -1, e = -1;
+                        int64_t hits = 0;
+                        if (!(iss >> L >> e >> hits) || L < 0 || e < 0) {
+                            ++lines_bad;
+                            continue;
+                        }
+                        ++lines_parsed;
+                        if (L >= (int)bc.expert_ranges.size()) continue;
+                        if (e >= bc.weights.num_experts) continue;
+                        const auto & r = bc.expert_ranges[L];
+                        if (r.gate.base_addr && r.gate.per_expert_bytes) {
+                            moe_cuda_expert_cache_prefetch(
+                                bc.expert_cache, L, e, /*kind=gate*/0,
+                                r.gate.base_addr + (size_t)e * r.gate.per_expert_bytes,
+                                r.gate.per_expert_bytes);
+                        }
+                        if (r.up.base_addr && r.up.per_expert_bytes) {
+                            moe_cuda_expert_cache_prefetch(
+                                bc.expert_cache, L, e, /*kind=up*/1,
+                                r.up.base_addr + (size_t)e * r.up.per_expert_bytes,
+                                r.up.per_expert_bytes);
+                        }
+                        if (r.down.base_addr && r.down.per_expert_bytes) {
+                            moe_cuda_expert_cache_prefetch(
+                                bc.expert_cache, L, e, /*kind=down*/2,
+                                r.down.base_addr + (size_t)e * r.down.per_expert_bytes,
+                                r.down.per_expert_bytes);
+                        }
+                        ++experts_prefetched;
+                    }
+                    // Block until all H→D copies complete, so first decode
+                    // doesn't race with the warm-up stream.
+                    moe_cuda_expert_cache_drain(bc.expert_cache);
+                    LOG_INF("[warm-snapshot] prefetched %zu experts (×3 kinds) from %s "
+                            "(%zu lines parsed, %zu bad)\n",
+                            experts_prefetched, warm_snapshot_profile.c_str(),
+                            lines_parsed, lines_bad);
                 }
             }
 #endif
