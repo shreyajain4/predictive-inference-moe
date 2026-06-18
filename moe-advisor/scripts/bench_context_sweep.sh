@@ -8,11 +8,13 @@
 # eats VRAM), smaller c → larger cache.
 #
 # Five configs per (prompt, context), paired:
-#   A. ngl_auto         no -ngl, no cache
-#   B. snap             snapshot cache only
-#   C. snap_pred        snap + predictor prefetch-k=12
-#   D. snap_warm        snap + warm-from-history (K=32)
-#   E. snap_warm_pred   snap + warm + predictor
+#   A. ngl_auto             no -ngl, no cache (auto-fit picks)
+#   B. offload_no_cache     -ngl 99 + exps=CPU + MIN_BATCH=1, no cache
+#                           (forced-offload baseline — what snap improves over)
+#   C. snap                 + snapshot cache only
+#   D. snap_pred            snap + predictor prefetch-k=12
+#   E. snap_warm            snap + warm-from-history (K=32)
+#   F. snap_warm_pred       snap + warm + predictor
 #
 # Cache MB per context — baselined at 3500 MiB (proven safe with c=4096
 # from earlier runs), shrunk linearly with extra KV beyond that. Floor 1500.
@@ -102,13 +104,24 @@ run_one() {
         --warm-snapshot-profile "$WARM" \
         -p "$prompt" > "$log" 2>&1 || true
       ;;
+    offload_no_cache)
+      # Forced-offload (-ngl 99 + exps=CPU + GGML_OP_OFFLOAD_MIN_BATCH=1)
+      # but NO expert-cache-mb → no VRAM cache pool allocated, no snapshot
+      # hook, no warm. copy_experts streams experts CPU→GPU every layer
+      # via the standard llama.cpp path. This is the "do nothing fancy"
+      # baseline for the forced-offload regime — what snap improves over.
+      GGML_OP_OFFLOAD_MIN_BATCH=1 "$BENCH" -m "$MODEL" -c "$ctx" -b "$ctx" -ub 1024 -n "$N_TOKENS" \
+        -ngl 99 --override-tensor exps=CPU \
+        --predictor-weights "$WEIGHTS" --prefetch-k 0 \
+        -p "$prompt" > "$log" 2>&1 || true
+      ;;
   esac
   stats=$(grep -m1 "moe_cuda_expert_cache final" "$log" 2>/dev/null || echo "no-cache")
   tps=$(grep -oE "decode:.*tok/s" "$log" 2>/dev/null | tail -1 || echo "no-tps")
   printf "%s\t%s\t%s\n" "${cfg}_c${ctx}_mb${cache_mb}" "$stats" "$tps"
 }
 
-CONFIGS="ngl_auto snap snap_pred snap_warm snap_warm_pred"
+CONFIGS="ngl_auto offload_no_cache snap snap_pred snap_warm snap_warm_pred"
 
 for ctx in $CONTEXTS; do
   for cfg in $CONFIGS; do
@@ -202,7 +215,7 @@ print("cache d2d hit rate (snap variants only)")
 print(f"{'config':<18} " + "  ".join(f"c={c:>5}" for c in contexts))
 print("-" * (18 + len(contexts) * 11))
 for cfg in configs:
-    if cfg == "ngl_auto": continue
+    if cfg in ("ngl_auto", "offload_no_cache"): continue
     row = f"{cfg:<18} "
     for ctx in contexts:
         tsv = outdir / f"{cfg}_c{ctx}.tsv"
