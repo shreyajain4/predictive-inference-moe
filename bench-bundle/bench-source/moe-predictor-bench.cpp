@@ -1290,6 +1290,12 @@ int main(int argc, char ** argv) {
     // kinds: gate/up/down) before the first decode call. First-token PCIe
     // is largely served from cache for the most-likely experts.
     std::string warm_snapshot_profile;
+    // Diagnostic: when true, install only the try_d2d hook on cache create,
+    // not the snapshot hook. Cache is populated solely by predictor +
+    // warm-from-history prefetches. Lets us measure predictor's standalone
+    // contribution without snapshot's free post-PCIe fill competing for
+    // the same expert slots.
+    bool no_snapshot_fill = false;
     // ── Sensitivity-aware substitution policy ─────────────────────────────
     // On a cache miss in a layer with sensitivity ≤ threshold, the cache may
     // substitute another cached expert at the same (layer, kind). Used to
@@ -1384,6 +1390,10 @@ int main(int argc, char ** argv) {
             warm_snapshot_profile = argv[i + 1];
             for (int j = i; j + 2 < argc; ++j) argv[j] = argv[j + 2];
             argc -= 2; --i;
+        } else if (strcmp(argv[i], "--no-snapshot-fill") == 0) {
+            no_snapshot_fill = true;
+            for (int j = i; j + 1 < argc; ++j) argv[j] = argv[j + 1];
+            argc -= 1; --i;
         } else if (strcmp(argv[i], "--substitution-sensitivity-file") == 0 && i + 1 < argc) {
             // Path to per-layer sensitivity JSON, e.g.
             // moe-advisor/data/sample/layer_sensitivity_isolated.json.
@@ -1772,7 +1782,13 @@ int main(int argc, char ** argv) {
                     LOG_ERR("expert-cache: create failed\n");
                     return 1;
                 }
-                moe_cuda_expert_cache_install_hook(bc.expert_cache);
+                if (no_snapshot_fill) {
+                    moe_cuda_expert_cache_install_hook_d2d_only(bc.expert_cache);
+                    LOG_INF("expert-cache: snapshot hook DISABLED (--no-snapshot-fill); "
+                            "cache will be populated only by predictor/warm prefetches\n");
+                } else {
+                    moe_cuda_expert_cache_install_hook(bc.expert_cache);
+                }
                 LOG_INF("expert-cache: %d slots × %zu bytes = %.1f MiB; hook installed\n",
                         n_slots, slot_size,
                         ((double)n_slots * slot_size) / (1024.0 * 1024.0));

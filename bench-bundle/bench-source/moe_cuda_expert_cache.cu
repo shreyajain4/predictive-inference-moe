@@ -521,6 +521,19 @@ extern "C" void moe_cuda_expert_cache_install_hook(moe_cuda_expert_cache * c) {
     ggml_set_moe_expert_cache_snapshot_hook(moe_cuda_expert_cache_snapshot);
 }
 
+// Diagnostic variant: install try_d2d only, no snapshot hook. The cache is
+// then populated EXCLUSIVELY by external prefetch calls (predictor + warm).
+// Use this to isolate the predictor's contribution from snapshot's "free fill"
+// — diagnosis tool for the redundancy hypothesis. If predictor-only beats
+// snap-only, the issue is snapshot + predictor duplication. If predictor-only
+// is still bad, the predictor's prefetch is structurally inefficient even
+// without snapshot to compete with.
+extern "C" void moe_cuda_expert_cache_install_hook_d2d_only(moe_cuda_expert_cache * c) {
+    g_cache = c;
+    ggml_set_moe_expert_cache_hook(moe_cuda_expert_cache_try_d2d);
+    // Intentionally NOT installing snapshot hook.
+}
+
 // ── Stats ───────────────────────────────────────────────────────────────
 
 extern "C" void moe_cuda_expert_cache_get_stats(

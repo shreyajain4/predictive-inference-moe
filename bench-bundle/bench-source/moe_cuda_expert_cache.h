@@ -121,6 +121,13 @@ void moe_cuda_expert_cache_snapshot(
 // Install both hooks (try_d2d on miss-lookup, snapshot on PCIe-completion).
 void moe_cuda_expert_cache_install_hook(moe_cuda_expert_cache * c);
 
+// Diagnostic variant: install ONLY the try_d2d (miss-lookup) hook, NOT the
+// snapshot hook. Cache is populated solely by external prefetch() calls
+// (predictor / warm). Used to isolate the predictor's contribution from
+// snapshot's free post-PCIe fill — answers "does predictor help when
+// snapshot isn't competing for the same fills?"
+void moe_cuda_expert_cache_install_hook_d2d_only(moe_cuda_expert_cache * c);
+
 // ── Stats ────────────────────────────────────────────────────────────────
 typedef struct {
     int64_t prefetches;           // total prefetch calls
