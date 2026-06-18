@@ -116,6 +116,36 @@ Natural question: if cache+prefetch is structurally dominated by `ngl_auto` here
 
 If you wanted to reproduce one of those papers' positive results in our infrastructure, the closest reachable regime would be: 40 GB A100 + Mixtral 8x22B Q8 (~140 GB, ngl_auto can fit only ~28% of layers) + batch ≥ 4. That's where the math flips back toward favoring snap+cache.
 
+## Snapshot vs ahead-of-time prefetch (2026-06-19)
+
+A separate diagnostic isolates the predictor's standalone contribution from snapshot via a new `--no-snapshot-fill` flag (commit `b1f373b`). Single-prompt smoke, c=4096:
+
+| Config | t/s | hit_rate | bytes_prefetched | bytes_d2d_served |
+|---|---|---|---|---|
+| **A: snap only** | **10.48** | 31.9% | 8.0 GB (snap fills) | 4.1 GB |
+| B: snap + predictor | 7.43 | 44.4% | 10.5 GB | 5.7 GB |
+| C: **predictor only** (no snap) | 7.26 | 43.1% | 4.6 GB | 5.5 GB |
+| D: nothing | 7.55 | 0.0% | 0 | 0 |
+
+**Findings:**
+
+1. **Snapshot alone is the only winner.** A is +39% over baseline D. Snapshot fills the cache with bytes that were crossing PCIe anyway → zero net PCIe overhead.
+2. **Predictor is net-negative even ALONE.** C (predictor-only) at 7.26 t/s is WORSE than D (nothing) at 7.55 — so predictor's harm isn't from snapshot redundancy. Removing snapshot competition (B → C) barely changed the answer (-0.17 t/s). The predictor's H→D prefetches themselves are the cost: they compete with `copy_experts` for PCIe bandwidth, add `try_d2d` hook latency on every cache lookup, and incur stream-0 sync stalls on hits.
+3. **The predictor hook is implemented correctly.** Recall is real (43% hit rate in C from purely predictor-driven fills, 60% dedup in B), the prefetches do land. The mechanism is just structurally inferior to snapshot on PCIe-bound consumer hardware.
+
+**Generalized claim:**
+
+> On PCIe-bound consumer GPUs, snapshot's "free fill" mechanism (post-PCIe capture) is structurally superior to ANY ahead-of-time prefetch mechanism (predictor OR warm-from-history) — even when prefetch has high recall, even when no other mechanism competes for the same cache slots. Snapshot pays zero net PCIe overhead while prefetch always adds H→D that has to overlap with compute (which it doesn't on gen4 PCIe + short layer compute time).
+
+This collapses two previously-separate findings (predictor-driven prefetch hurts, warm-from-history barely helps) into one structural rule. They're in the same losing class: ahead-of-time H→D into cache. **Substitution** ([sensitivity_substitution_result](../../memory)) is in a different class — it doesn't add PCIe, it replaces a missed expert with an approximation. That's why substitution gets a positive result in this regime where prefetch can't.
+
+**Where ahead-of-time prefetch could still win:**
+
+- Compute time per layer >> per-expert PCIe time (workstation gen5, bigger experts) → prefetches actually overlap with compute
+- No reactive PCIe to capture (batched serving where one PCIe serves many tokens, or models so big that snapshot churns too fast to retain anything)
+
+Otherwise: invest in snapshot, not prefetch.
+
 **Warm-from-history adds +0.53 t/s (+4.8%) over snapshot alone, paired across 29 prompts.** Real but small effect. Hit-rate is nearly identical between snap and snap+warm (35.78 vs 35.75%) — the warm-loaded experts don't show up as d2d_hits, yet per-prompt tok/s is consistently higher. The warm-up's `drain()` finishes before the decode timer starts, so H→D overhead is amortized and the cache state at decode-start is slightly different (different evictions during warm-up → different cold-start configuration). Single-prompt smoke showed +0.4 t/s at the edge of noise; the paired 29-prompt result confirms the direction with much tighter variance.
 
 **Snapshot is real per-prompt** (+4.8 t/s over raw forced-offload in single-prompt smoke). Aggregate hit rate is lower (35.75% vs 61.5%) because each fresh prompt routes to new experts — snapshot has to refill from scratch every iteration.
