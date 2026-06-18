@@ -14,12 +14,11 @@
 #   D. snap_warm        snap + warm-from-history (K=32)
 #   E. snap_warm_pred   snap + warm + predictor
 #
-# Cache MB per context (derived assuming 8 GB VRAM - 2 GB non-expert
-# weights - 500 MB overhead - KV(ctx) at 98 KB/token for Qwen3-30B-A3B
-# fp16 KV; floored at 1500, capped at 5500):
-#   c=1024:  5500 MiB    c=8192:  4900 MiB
-#   c=2048:  5500 MiB    c=16384: 4124 MiB
-#   c=4096:  5300 MiB    c=32768: 2556 MiB
+# Cache MB per context — baselined at 3500 MiB (proven safe with c=4096
+# from earlier runs), shrunk linearly with extra KV beyond that. Floor 1500.
+#   c=4096:  3500 MiB    c=16384:  2324 MiB
+#   c=8192:  3108 MiB    c=32768:  1500 MiB (floor)
+#                        c=65536:  1500 MiB (floor)
 #
 # Usage:
 #   bash scripts/bench_context_sweep.sh [N_PROMPTS] "ctx1 ctx2 ..."
@@ -31,7 +30,7 @@
 set -e
 
 N_PROMPTS=${1:-10}
-CONTEXTS=${2:-"1024 2048 4096 8192 16384 32768"}
+CONTEXTS=${2:-"4096 8192 16384 32768 65536"}
 
 : "${MODEL:=/home/shreya/models/Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf}"
 : "${WEIGHTS:=/home/shreya/predictive-inference-moe/bench-bundle/predictor-weights/qwen3_predictor_weights.bin}"
@@ -41,14 +40,17 @@ CONTEXTS=${2:-"1024 2048 4096 8192 16384 32768"}
 : "${BENCH:=$HOME/llama.cpp/build/bin/llama-moe-predictor-bench}"
 : "${N_TOKENS:=8}"
 
-# 8 GB VRAM budget for 3070, minus non-expert weights and overhead and KV.
-# KV: 98 KB/token for Qwen3-30B-A3B fp16 (from memory).
+# Cache size baselined at 3500 MiB (known-safe with c=4096 from earlier
+# runs), reduced linearly with extra KV beyond c=4096. Floored at 1500.
+# Tried going larger at small c before (5500) — OOM'd because lm_head +
+# embed + per-layer attention + driver overhead ate more than I assumed.
 cache_mb_for_ctx() {
   local ctx=$1
   local kv_mb=$(( ctx * 98 / 1024 ))
-  local cache=$(( 8192 - 2000 - 500 - kv_mb ))
+  local baseline_kv=$(( 4096 * 98 / 1024 ))   # 392 MiB at c=4096
+  local cache=$(( 3500 - (kv_mb - baseline_kv) ))
   if [ $cache -lt 1500 ]; then cache=1500; fi
-  if [ $cache -gt 5500 ]; then cache=5500; fi
+  if [ $cache -gt 3500 ]; then cache=3500; fi
   echo $cache
 }
 
