@@ -35,6 +35,35 @@ User-history-based pre-population of the snapshot expert cache. 100 prompts from
 
 `ngl=auto` = pass no `-ngl` flag at all; llama.cpp's `common_fit_params` chooses `n_gpu_layers` to fit available VRAM. On 3070+Qwen3-30B-A3B Q4 with c=4096 it picks more than 12 layers and is +25% over manual ngl=12. Range is also much tighter (26.44–26.79 vs 19.37–21.56 for ngl=12). **This is the bar to beat, not ngl=12.**
 
+## Result — context sweep (single prompt, 70 chars)
+
+Tests the hypothesis "ngl_auto's lead shrinks as KV grows and displaces experts on GPU."
+
+| Config | c=4096 | c=8192 | c=16384 | c=32768 | c=65536 |
+|---|---|---|---|---|---|
+| **ngl_auto** | **26.27** | **25.86** | **24.94** | **23.00** | **20.30** |
+| snap | 10.47 | 10.13 | 9.55 | OOM | OOM |
+| snap_pred | 7.41 | 6.75 | 6.53 | OOM | OOM |
+| snap_warm | 10.91 | 10.49 | 9.96 | OOM | OOM |
+| snap_warm_pred | 7.67 | 6.97 | 6.72 | OOM | OOM |
+
+Cache hit rates (snap variants only):
+
+| Config | c=4096 | c=8192 | c=16384 |
+|---|---|---|---|
+| snap | 31.9% | 29.6% | 26.4% |
+| snap_pred | 44.3% | 42.1% | 41.6% |
+| snap_warm | **31.9%** | **29.6%** | **26.4%** |
+| snap_warm_pred | **44.3%** | **42.1%** | **41.6%** |
+
+**Hypothesis falsified.** ngl_auto loses only 23% throughput across c=4k→65k (26.27 → 20.30) and remains ~2× the snapshot regime at every tested context. KV growth on 3070+Qwen3-30B-A3B Q4 doesn't push auto-fit into a regime where forced-offload-with-cache can catch up.
+
+**Predictor hurts by ~3 t/s** despite raising cache hit rate by ~12 pp. Extra H→D prefetches cost more than they save. Same pattern as the original snapshot bench's predictor-driven prefetch result (9.04 vs 12.58 t/s).
+
+**Warm-from-history's hit rate is identical to snap-only at every context** (31.9 / 29.6 / 26.4 — digit-for-digit). Warm-loaded experts self-evict during warm-up before decode begins; snap then organically fills the cache with the same experts warm would have hit. The +0.5 t/s tok/s edge (snap_warm vs snap) is post-warm-up state perturbation, not cache serving.
+
+Snap variants OOM at c=32768 and c=65536 even at the cache_mb=1500 floor. Not investigated further; with the regime losing this badly to ngl_auto, fixing the OOM doesn't change the conclusion.
+
 **Warm-from-history adds +0.53 t/s (+4.8%) over snapshot alone, paired across 29 prompts.** Real but small effect. Hit-rate is nearly identical between snap and snap+warm (35.78 vs 35.75%) — the warm-loaded experts don't show up as d2d_hits, yet per-prompt tok/s is consistently higher. The warm-up's `drain()` finishes before the decode timer starts, so H→D overhead is amortized and the cache state at decode-start is slightly different (different evictions during warm-up → different cold-start configuration). Single-prompt smoke showed +0.4 t/s at the edge of noise; the paired 29-prompt result confirms the direction with much tighter variance.
 
 **Snapshot is real per-prompt** (+4.8 t/s over raw forced-offload in single-prompt smoke). Aggregate hit rate is lower (35.75% vs 61.5%) because each fresh prompt routes to new experts — snapshot has to refill from scratch every iteration.
