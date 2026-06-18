@@ -1,26 +1,37 @@
 #!/bin/bash
 # bench_context_sweep.sh
-# Sweep n_ctx ∈ {4096, 8192, 16384, 32768} to test the hypothesis:
-# ngl=auto's lead shrinks as KV grows (because KV displaces resident
-# experts on GPU). At long context, snap+warm and predictor variants
-# may catch up.
+# Sweep n_ctx across mechanism variants on RTX 3070 + Qwen3-30B-A3B Q4.
+# Tests the hypothesis: ngl=auto's lead shrinks as KV grows (KV displaces
+# resident experts on GPU). At long context, snap variants may catch up.
+# At small context (1024, 2048) ngl=auto fits nearly everything → should
+# dominate. Cache size adapts per-context: bigger c → smaller cache (KV
+# eats VRAM), smaller c → larger cache.
 #
-# Three configs per prompt per context, paired:
-#   A. ngl_auto      no -ngl flag (common_fit_params picks)
-#   B. snap_warm     forced offload + snapshot cache + warm-from-history
-#   C. snap_warm_pred  B + predictor prefetch-k=12
+# Five configs per (prompt, context), paired:
+#   A. ngl_auto         no -ngl, no cache
+#   B. snap             snapshot cache only
+#   C. snap_pred        snap + predictor prefetch-k=12
+#   D. snap_warm        snap + warm-from-history (K=32)
+#   E. snap_warm_pred   snap + warm + predictor
+#
+# Cache MB per context (derived assuming 8 GB VRAM - 2 GB non-expert
+# weights - 500 MB overhead - KV(ctx) at 98 KB/token for Qwen3-30B-A3B
+# fp16 KV; floored at 1500, capped at 5500):
+#   c=1024:  5500 MiB    c=8192:  4900 MiB
+#   c=2048:  5500 MiB    c=16384: 4124 MiB
+#   c=4096:  5300 MiB    c=32768: 2556 MiB
 #
 # Usage:
 #   bash scripts/bench_context_sweep.sh [N_PROMPTS] "ctx1 ctx2 ..."
-# Defaults: N_PROMPTS=15  contexts="4096 8192 16384 32768"
+# Defaults: N_PROMPTS=10  contexts="1024 2048 4096 8192 16384 32768"
 #
-# Time: 3 configs × N prompts × 4 contexts × ~25 s/launch
-# 15 × 12 = 180 runs ≈ 75 min.
+# Smoke first: bash scripts/bench_context_sweep.sh 2 "1024 32768"
+# Full: 5 × 6 × 10 = 300 runs × ~25s ≈ 2 hours at defaults.
 
 set -e
 
-N_PROMPTS=${1:-15}
-CONTEXTS=${2:-"4096 8192 16384 32768"}
+N_PROMPTS=${1:-10}
+CONTEXTS=${2:-"1024 2048 4096 8192 16384 32768"}
 
 : "${MODEL:=/home/shreya/models/Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf}"
 : "${WEIGHTS:=/home/shreya/predictive-inference-moe/bench-bundle/predictor-weights/qwen3_predictor_weights.bin}"
@@ -30,42 +41,74 @@ CONTEXTS=${2:-"4096 8192 16384 32768"}
 : "${BENCH:=$HOME/llama.cpp/build/bin/llama-moe-predictor-bench}"
 : "${N_TOKENS:=8}"
 
+# 8 GB VRAM budget for 3070, minus non-expert weights and overhead and KV.
+# KV: 98 KB/token for Qwen3-30B-A3B fp16 (from memory).
+cache_mb_for_ctx() {
+  local ctx=$1
+  local kv_mb=$(( ctx * 98 / 1024 ))
+  local cache=$(( 8192 - 2000 - 500 - kv_mb ))
+  if [ $cache -lt 1500 ]; then cache=1500; fi
+  if [ $cache -gt 5500 ]; then cache=5500; fi
+  echo $cache
+}
+
 OUTDIR=/tmp/ctx_sweep_$(date +%s)
 mkdir -p "$OUTDIR"
 echo "outdir: $OUTDIR  contexts: $CONTEXTS  prompts: $N_PROMPTS"
+echo "cache MB per context:"
+for ctx in $CONTEXTS; do
+  echo "  c=$ctx  cache_mb=$(cache_mb_for_ctx $ctx)"
+done
 
 run_one() {
   local cfg="$1" ctx="$2" prompt="$3" log="$4"
+  local cache_mb=$(cache_mb_for_ctx "$ctx")
   case "$cfg" in
     ngl_auto)
       "$BENCH" -m "$MODEL" -c "$ctx" -b "$ctx" -ub 1024 -n "$N_TOKENS" \
         --predictor-weights "$WEIGHTS" --prefetch-k 0 \
         -p "$prompt" > "$log" 2>&1 || true
       ;;
+    snap)
+      GGML_OP_OFFLOAD_MIN_BATCH=1 "$BENCH" -m "$MODEL" -c "$ctx" -b "$ctx" -ub 1024 -n "$N_TOKENS" \
+        -ngl 99 --override-tensor exps=CPU \
+        --expert-offsets "$OFFSETS" --expert-cache-mb "$cache_mb" \
+        --predictor-weights "$WEIGHTS" --prefetch-k 0 \
+        -p "$prompt" > "$log" 2>&1 || true
+      ;;
+    snap_pred)
+      GGML_OP_OFFLOAD_MIN_BATCH=1 "$BENCH" -m "$MODEL" -c "$ctx" -b "$ctx" -ub 1024 -n "$N_TOKENS" \
+        -ngl 99 --override-tensor exps=CPU \
+        --expert-offsets "$OFFSETS" --expert-cache-mb "$cache_mb" \
+        --predictor-weights "$WEIGHTS" --prefetch-k 12 \
+        -p "$prompt" > "$log" 2>&1 || true
+      ;;
     snap_warm)
       GGML_OP_OFFLOAD_MIN_BATCH=1 "$BENCH" -m "$MODEL" -c "$ctx" -b "$ctx" -ub 1024 -n "$N_TOKENS" \
         -ngl 99 --override-tensor exps=CPU \
+        --expert-offsets "$OFFSETS" --expert-cache-mb "$cache_mb" \
         --predictor-weights "$WEIGHTS" --prefetch-k 0 \
-        --expert-offsets "$OFFSETS" --expert-cache-mb 3500 \
         --warm-snapshot-profile "$WARM" \
         -p "$prompt" > "$log" 2>&1 || true
       ;;
     snap_warm_pred)
       GGML_OP_OFFLOAD_MIN_BATCH=1 "$BENCH" -m "$MODEL" -c "$ctx" -b "$ctx" -ub 1024 -n "$N_TOKENS" \
         -ngl 99 --override-tensor exps=CPU \
+        --expert-offsets "$OFFSETS" --expert-cache-mb "$cache_mb" \
         --predictor-weights "$WEIGHTS" --prefetch-k 12 \
-        --expert-offsets "$OFFSETS" --expert-cache-mb 3500 \
         --warm-snapshot-profile "$WARM" \
         -p "$prompt" > "$log" 2>&1 || true
       ;;
   esac
   stats=$(grep -m1 "moe_cuda_expert_cache final" "$log" 2>/dev/null || echo "no-cache")
   tps=$(grep -oE "decode:.*tok/s" "$log" 2>/dev/null | tail -1 || echo "no-tps")
-  printf "%s\t%s\t%s\n" "${cfg}_c${ctx}" "$stats" "$tps"
+  printf "%s\t%s\t%s\n" "${cfg}_c${ctx}_mb${cache_mb}" "$stats" "$tps"
 }
 
+CONFIGS="ngl_auto snap snap_pred snap_warm snap_warm_pred"
+
 for ctx in $CONTEXTS; do
-  for cfg in ngl_auto snap_warm snap_warm_pred; do
+  for cfg in $CONFIGS; do
     : > "$OUTDIR/${cfg}_c${ctx}.tsv"
   done
 done
@@ -77,7 +120,7 @@ while IFS=$'\t' read -r user prompt; do
   [ $i -gt "$N_PROMPTS" ] && break
   echo "[$i/$N_PROMPTS]"
   for ctx in $CONTEXTS; do
-    for cfg in ngl_auto snap_warm snap_warm_pred; do
+    for cfg in $CONFIGS; do
       log="$OUTDIR/${cfg}_c${ctx}_${i}.log"
       run_one "$cfg" "$ctx" "$prompt" "$log" >> "$OUTDIR/${cfg}_c${ctx}.tsv"
     done
@@ -86,18 +129,19 @@ done < "$TESTSET"
 
 echo ""
 echo "=== AGGREGATES ==="
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 python3 - << PYEOF
-import re, os
+import re
 from pathlib import Path
 outdir = Path("$OUTDIR")
 contexts = "$CONTEXTS".split()
-configs = ["ngl_auto", "snap_warm", "snap_warm_pred"]
+configs = "$CONFIGS".split()
 
 PAT_TPS = re.compile(r"\(([\d.]+) tok/s")
 PAT_HITS = re.compile(r"d2d_hits=(\d+)")
 PAT_MISS = re.compile(r"d2d_misses=(\d+)")
 
+print()
+print("mean tok/s")
 print(f"{'config':<18} " + "  ".join(f"c={c:>5}" for c in contexts))
 print("-" * (18 + len(contexts) * 11))
 for cfg in configs:
@@ -105,39 +149,35 @@ for cfg in configs:
     for ctx in contexts:
         tsv = outdir / f"{cfg}_c{ctx}.tsv"
         if not tsv.exists():
-            row += f"{'-':>8}  "
-            continue
-        tps_vals = []
-        for line in tsv.read_text().splitlines():
-            m = PAT_TPS.search(line)
-            if m:
-                tps_vals.append(float(m.group(1)))
-        if tps_vals:
-            mean = sum(tps_vals) / len(tps_vals)
-            row += f"{mean:>6.2f}    "
+            row += "  -      "; continue
+        tps = [float(m.group(1)) for line in tsv.read_text().splitlines()
+               for m in [PAT_TPS.search(line)] if m]
+        if tps:
+            row += f"{sum(tps)/len(tps):>6.2f}   "
         else:
-            row += f"{'-':>8}  "
+            row += "  -      "
     print(row)
 
 print()
-print("cache hit rates (snap_warm variants only):")
-for cfg in ["snap_warm", "snap_warm_pred"]:
+print("cache d2d hit rate (snap variants only)")
+print(f"{'config':<18} " + "  ".join(f"c={c:>5}" for c in contexts))
+print("-" * (18 + len(contexts) * 11))
+for cfg in configs:
+    if cfg == "ngl_auto": continue
     row = f"{cfg:<18} "
     for ctx in contexts:
         tsv = outdir / f"{cfg}_c{ctx}.tsv"
         if not tsv.exists():
-            row += f"{'-':>8}  "
-            continue
+            row += "  -      "; continue
         h = m = 0
         for line in tsv.read_text().splitlines():
             hm = PAT_HITS.search(line); mm = PAT_MISS.search(line)
             if hm: h += int(hm.group(1))
             if mm: m += int(mm.group(1))
         if h + m > 0:
-            hr = 100 * h / (h + m)
-            row += f"{hr:>5.1f}%    "
+            row += f"{100*h/(h+m):>5.1f}%   "
         else:
-            row += f"{'-':>8}  "
+            row += "  -      "
     print(row)
 PYEOF
 echo ""
