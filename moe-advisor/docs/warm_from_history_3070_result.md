@@ -62,7 +62,41 @@ Cache hit rates (snap variants only):
 
 **Warm-from-history's hit rate is identical to snap-only at every context** (31.9 / 29.6 / 26.4 — digit-for-digit). Warm-loaded experts self-evict during warm-up before decode begins; snap then organically fills the cache with the same experts warm would have hit. The +0.5 t/s tok/s edge (snap_warm vs snap) is post-warm-up state perturbation, not cache serving.
 
-Snap variants OOM at c=32768 and c=65536 even at the cache_mb=1500 floor. Not investigated further; with the regime losing this badly to ngl_auto, fixing the OOM doesn't change the conclusion.
+Snap variants OOM at c=32768 and c=65536 with cache_mb=1500 because graph activation memory grows with `n_batch=ctx`. Dropping cache_mb to 600 MiB at c=32k lets snap run (~9.5 t/s), still well behind ngl_auto at 23. `offload_no_cache` (forced-offload regime *without* the VRAM pool) runs flat ~8.6 t/s across c=4k–32k; snap adds +1.84 t/s on top of that — so snapshot itself is doing real work in its regime, but the entire regime sits at half of ngl_auto's performance.
+
+## Why expert-level hybrid within a layer doesn't help at batch=1
+
+A tempting fallback for cache misses would be: route the *uncached* experts to CPU compute (no PCIe) while letting cached ones run on GPU. At batch=1 this doesn't speed anything up.
+
+| Path | Time per layer |
+|---|---|
+| All GPU (cache hit) | ~0.05 ms |
+| All CPU compute | ~0.30 ms (DRAM-bound) |
+| Mixed 4 GPU + 4 CPU | max(0.05, 0.30) = **0.30 ms** |
+
+Layer L+1's input is layer L's full output → can't start until ALL active experts at L finish for the current token. The slowest expert in the mix gates the layer transition. Mixed gives no speedup over pure CPU.
+
+This is why ngl_auto's *layer-level* split works (each layer runs entirely on one side, transitions cost ~80 KB activation transfer between layers) while *expert-level* split within a layer doesn't. Expert-level hybrid only helps at batch ≫ 1 (different tokens take different paths in parallel), in speculative decoding, or in pipelined prefill.
+
+## Regime classification — when this whole class of mechanism could win
+
+The cache mechanism is a workaround for one specific bottleneck: per-token PCIe between CPU-resident experts and GPU compute. The mechanism is structurally relevant only when:
+
+1. **PCIe ≥ DRAM bandwidth** (true on H100/PCIe5 + DDR5, false on RTX 3070 + DDR4/5), OR
+2. **The model doesn't fit any productive partial offload** (ngl_auto degenerates, forced-offload is mandatory)
+
+Regimes where snap/warm-from-history could win:
+- Model ≫ VRAM (e.g. Mixtral 8x22B Q8 ~140 GB on 40 GB A100, DeepSeek-V3, …)
+- Batch ≫ 1 serving (PCIe amortizes across many tokens reusing same expert)
+- NVMe-backed inference (snapshot amortizes disk reads)
+- TTFT (first-token latency) optimization in cold-start serving
+
+Regimes where it can't:
+- Mac (unified memory, no PCIe between CPU and GPU)
+- Consumer GPU + model that fits via ngl_auto (this measurement)
+- Single-stream batch=1 decode with PCIe slower than DRAM
+
+The 40 GB A100 + Mixtral 8x22B Q4 case (~80 GB model) is borderline — ngl_auto fits ~half, snap+cache competes with the CPU half's traffic. Worth measuring once if we want a tighter answer; otherwise the negative result here generalizes.
 
 **Warm-from-history adds +0.53 t/s (+4.8%) over snapshot alone, paired across 29 prompts.** Real but small effect. Hit-rate is nearly identical between snap and snap+warm (35.78 vs 35.75%) — the warm-loaded experts don't show up as d2d_hits, yet per-prompt tok/s is consistently higher. The warm-up's `drain()` finishes before the decode timer starts, so H→D overhead is amortized and the cache state at decode-start is slightly different (different evictions during warm-up → different cold-start configuration). Single-prompt smoke showed +0.4 t/s at the edge of noise; the paired 29-prompt result confirms the direction with much tighter variance.
 
