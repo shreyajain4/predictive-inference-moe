@@ -457,7 +457,9 @@ static inline void mincore_check_expert(bench_ctx & b, int32_t layer, int32_t ex
         size_t len = p.per_expert_bytes + off;
         size_t npages = (len + page_size - 1) / page_size;
         if (npages == 0 || npages > 2048) return;  // sanity cap
-        std::vector<char> vec(npages, 0);
+        // mincore's third arg is char* on macOS, unsigned char* on Linux —
+        // use unsigned char to match Linux (Mac accepts the implicit conversion).
+        std::vector<unsigned char> vec(npages, 0);
         if (mincore((void *)aligned, npages * page_size, vec.data()) == 0) {
             int resident = 0;
             for (size_t i = 0; i < npages; ++i) if (vec[i] & 0x1) resident++;
