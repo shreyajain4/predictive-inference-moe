@@ -27,10 +27,13 @@ User-history-based pre-population of the snapshot expert cache. 100 prompts from
 
 | Config | mean tok/s | median | min | max | hit rate |
 |---|---|---|---|---|---|
-| ngl=12 | **21.31** | 21.38 | 19.37 | 21.56 | n/a |
+| **ngl=auto** | **26.70** | 26.72 | 26.44 | 26.79 | n/a |
+| ngl=12 (manual) | 21.31 | 21.38 | 19.37 | 21.56 | n/a |
 | CPU MoE | 16.77 | 16.76 | 16.65 | 16.87 | 0% |
 | Snapshot + warm-from-history (K=32) | 11.59 | 11.67 | 9.73 | 13.34 | 35.78% |
 | Snapshot alone | 11.06 | 11.10 | 9.31 | 12.95 | 35.75% |
+
+`ngl=auto` = pass no `-ngl` flag at all; llama.cpp's `common_fit_params` chooses `n_gpu_layers` to fit available VRAM. On 3070+Qwen3-30B-A3B Q4 with c=4096 it picks more than 12 layers and is +25% over manual ngl=12. Range is also much tighter (26.44–26.79 vs 19.37–21.56 for ngl=12). **This is the bar to beat, not ngl=12.**
 
 **Warm-from-history adds +0.53 t/s (+4.8%) over snapshot alone, paired across 29 prompts.** Real but small effect. Hit-rate is nearly identical between snap and snap+warm (35.78 vs 35.75%) — the warm-loaded experts don't show up as d2d_hits, yet per-prompt tok/s is consistently higher. The warm-up's `drain()` finishes before the decode timer starts, so H→D overhead is amortized and the cache state at decode-start is slightly different (different evictions during warm-up → different cold-start configuration). Single-prompt smoke showed +0.4 t/s at the edge of noise; the paired 29-prompt result confirms the direction with much tighter variance.
 
