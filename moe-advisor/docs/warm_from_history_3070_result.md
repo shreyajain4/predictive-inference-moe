@@ -146,6 +146,41 @@ This collapses two previously-separate findings (predictor-driven prefetch hurts
 
 Otherwise: invest in snapshot, not prefetch.
 
+## Final: Mixtral 8x22B SSD-regime test (2026-06-19)
+
+The last regime to test was "model genuinely doesn't fit in CPU+VRAM and forces SSD spillage." On Legion (45 GB RAM + 8 GB VRAM = 53 GB fast memory), Mixtral 8x22B IQ4_XS (~76 GB) is the smallest model that triggers this regime.
+
+**Setup:**
+- 30 MoE layers × 8 experts × top-2 routing
+- Per-expert at IQ4_XS: 170 MB (cache slot 69 MB for max kind = down projection)
+- Non-expert weights on GPU: 3.3 GB (fixed by model)
+- Compute graph buffers: ~500 MB minimum even with `-c 512 -ub 128`
+- Max cache budget on 8 GB 3070: ~3.5 GB → 50 slots → 20% expert coverage ceiling
+- Achievable cache: 1500 MB → 22 slots → 9% coverage
+
+**Result table:**
+
+| Config | tok/s |
+|---|---|
+| ngl_auto (llama-cli, no cache, no override) | **0.40** |
+| Forced offload no cache | 0.20 |
+| Forced offload + snap+cache (cache_mb=1500) | **0.19** |
+
+**Cache delivered zero d2d hits.** Per-token working set is 30 layers × 2 active × 3 kinds = 180 expert reads; cache has 22 slots. Working set is 8× larger than cache → every layer evicts the previous layer's snap fills before reuse. 8490 snapshot fills and 440 GB of D→D traffic, all wasted.
+
+## Complete scoreboard across all 4 tested regimes
+
+| Regime | ngl_auto | snap+cache | ngl_auto wins by |
+|---|---|---|---|
+| Qwen3-30B-A3B Q4 (fits RAM, 3070) | 26.70 | 11.06 | 2.4× |
+| DeepSeek-V2-Lite Q8 (fits RAM, 3070) | 13.58 | 7.14 | 1.9× |
+| Cgroup-pressured DS Q8 (simulated SSD) | ~13.6 | ~7.1 | ~1.9× |
+| Mixtral 8x22B IQ4_XS (true SSD spill, 3070) | **0.40** | **0.19** | **2.1×** |
+
+**Definitive conclusion:** on RTX 3070 with gen4 PCIe, snap+cache is structurally dominated by ngl_auto across every accessible regime, regardless of model size or memory pressure. The 2× gap is consistent because the root cause is the same — PCIe gen4 is slower than DRAM, so reactive CPU compute (ngl_auto) beats per-token PCIe transfer (forced offload + cache).
+
+**Path to positive result:** workstation gen5 PCIe hardware (RTX PRO 6000 Blackwell, ~₹179/hr on Jarvis cloud) where PCIe is competitive with DRAM AND the cache pool is large enough to hold the per-token working set. Not reachable on this consumer hardware.
+
 **Warm-from-history adds +0.53 t/s (+4.8%) over snapshot alone, paired across 29 prompts.** Real but small effect. Hit-rate is nearly identical between snap and snap+warm (35.78 vs 35.75%) — the warm-loaded experts don't show up as d2d_hits, yet per-prompt tok/s is consistently higher. The warm-up's `drain()` finishes before the decode timer starts, so H→D overhead is amortized and the cache state at decode-start is slightly different (different evictions during warm-up → different cold-start configuration). Single-prompt smoke showed +0.4 t/s at the edge of noise; the paired 29-prompt result confirms the direction with much tighter variance.
 
 **Snapshot is real per-prompt** (+4.8 t/s over raw forced-offload in single-prompt smoke). Aggregate hit rate is lower (35.75% vs 61.5%) because each fresh prompt routes to new experts — snapshot has to refill from scratch every iteration.
