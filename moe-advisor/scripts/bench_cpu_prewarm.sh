@@ -33,11 +33,17 @@ echo ""
 run_llama_cli() {
   local label="$1"
   echo "=== $label ==="
-  # Close stdin so llama-cli exits after -n tokens instead of going interactive
-  $HOME/llama.cpp/build/bin/llama-cli \
-    -m "$MODEL_PART1" -c 512 -n "$N_TOKENS" -p "$PROMPT" < /dev/null 2>&1 \
-    | grep -oE "Prompt:[^|]+\|.*tok/s" \
-    | tail -1
+  # -no-cnv: disable conversation mode so llama-cli exits after -n tokens
+  # timeout: hard safety net in case llama-cli still hangs (5 min cap)
+  local logf=/tmp/llama_run_$$.log
+  timeout 300 $HOME/llama.cpp/build/bin/llama-cli \
+    -m "$MODEL_PART1" -c 512 -n "$N_TOKENS" -no-cnv -p "$PROMPT" \
+    < /dev/null > "$logf" 2>&1 || echo "  (timed out or errored)"
+  # Try multiple t/s patterns since llama-cli's output format varies
+  grep -oE "Prompt:[^|]+\|[^]]+tok/s\]?" "$logf" | tail -1
+  grep -oE "decode[^(]*\(([0-9.]+) tok/s" "$logf" | tail -1
+  grep -oE "[0-9.]+ tokens? per second" "$logf" | tail -1
+  rm -f "$logf"
   echo ""
 }
 
