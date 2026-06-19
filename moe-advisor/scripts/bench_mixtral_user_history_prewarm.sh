@@ -57,7 +57,6 @@ if [ ! -f "$TRACE_CSV" ]; then
     -f "$TRACE_PROMPTS" \
     -c 4096 -b 4096 -ub 128 \
     -n 16 \
-    -no-cnv \
     > "$TRACE_CSV" 2> "$WORK/trace.log" || { echo "  trace failed; see $WORK/trace.log"; tail -20 "$WORK/trace.log"; exit 1; }
 fi
 echo "  trace CSV: $(wc -l < "$TRACE_CSV") lines"
