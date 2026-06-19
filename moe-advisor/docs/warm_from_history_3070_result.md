@@ -215,6 +215,42 @@ The complete landscape across 5 tested mechanism classes on RTX 3070:
 
 Every "ahead-of-time pre-position" mechanism is dominated by the OS's reactive LRU. The only positive mechanism in the project is sensitivity-aware substitution (per `sensitivity_substitution_result`) — it doesn't add or pre-position traffic, it *skips* traffic by accepting quality loss.
 
+## Oracle prewarm test (the upper bound)
+
+Final sanity check: instead of arbitrary first-K or frequency-based selection, **use the per-prompt ORACLE** — literally the top-K experts that the test prompt's tokens actually route to (extracted from the parquet of that prompt's routing). This is the upper bound for any predictor.
+
+Also trained an LR predictor on the same 30-prompt routing data via `lr_governor_sweep.py`:
+- recall@2 = 42% (1.68× random)
+- recall@4 = 66% (1.32× random)
+- recall@6 = 85% (1.14× random)
+
+Real signal, modest lift. The per-prompt oracle effectively models "what if the predictor were perfect."
+
+**Oracle prewarm result on the first training prompt:**
+
+| Config | t/s |
+|---|---|
+| Cold ngl_auto | 0.39 |
+| ngl_auto after ORACLE prewarm (19.7 GB into OS cache) | 0.40 |
+
+**Neutral.** Within noise. Even with literal ground-truth selection, the OS already had those pages cached from previous runs / cold execution. There's no headroom for an ahead-of-time mechanism to add value.
+
+**Final claim:** *Linux's reactive page cache LRU + ngl_auto already extract whatever cross-prompt-recurrence signal exists in real workloads. The ceiling is not predictor accuracy — there's no information left to pre-position. Any ahead-of-time mechanism (CPU or GPU) is at best redundant with what the OS does for free.*
+
+**Complete tested landscape (7 mechanism variants × ngl_auto baseline):**
+
+| Mechanism | vs ngl_auto |
+|---|---|
+| GPU snap | LOSES |
+| GPU snap + warm-from-history | LOSES |
+| GPU predictor prefetch | LOSES |
+| GPU snap + warm + predictor | LOSES |
+| CPU prewarm (arbitrary first-K) | LOSES (-10%) |
+| CPU prewarm (user-history frequency) | NEUTRAL |
+| **CPU prewarm (per-prompt ORACLE)** | **NEUTRAL** |
+
+The mechanism class is dominated on consumer GPU + Linux mmap. To find a positive direction, you need either (a) different hardware (workstation gen5 PCIe) or (b) a different mechanism class (substitution, batched serving, NVMe-backed without OS cache).
+
 **Warm-from-history adds +0.53 t/s (+4.8%) over snapshot alone, paired across 29 prompts.** Real but small effect. Hit-rate is nearly identical between snap and snap+warm (35.78 vs 35.75%) — the warm-loaded experts don't show up as d2d_hits, yet per-prompt tok/s is consistently higher. The warm-up's `drain()` finishes before the decode timer starts, so H→D overhead is amortized and the cache state at decode-start is slightly different (different evictions during warm-up → different cold-start configuration). Single-prompt smoke showed +0.4 t/s at the edge of noise; the paired 29-prompt result confirms the direction with much tighter variance.
 
 **Snapshot is real per-prompt** (+4.8 t/s over raw forced-offload in single-prompt smoke). Aggregate hit rate is lower (35.75% vs 61.5%) because each fresh prompt routes to new experts — snapshot has to refill from scratch every iteration.
