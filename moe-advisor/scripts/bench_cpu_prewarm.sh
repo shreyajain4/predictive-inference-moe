@@ -30,19 +30,20 @@ echo "K=$K experts/layer  N_TOKENS=$N_TOKENS"
 echo "model: $MODEL_PART1 (+part2)"
 echo ""
 
-run_llama_cli() {
+run_bench_ngl_auto() {
   local label="$1"
   echo "=== $label ==="
-  # -no-cnv: disable conversation mode so llama-cli exits after -n tokens
-  # timeout: hard safety net in case llama-cli still hangs (5 min cap)
-  local logf=/tmp/llama_run_$$.log
-  timeout 300 $HOME/llama.cpp/build/bin/llama-cli \
-    -m "$MODEL_PART1" -c 512 -n "$N_TOKENS" -no-cnv -p "$PROMPT" \
-    < /dev/null > "$logf" 2>&1 || echo "  (timed out or errored)"
-  # Try multiple t/s patterns since llama-cli's output format varies
-  grep -oE "Prompt:[^|]+\|[^]]+tok/s\]?" "$logf" | tail -1
-  grep -oE "decode[^(]*\(([0-9.]+) tok/s" "$logf" | tail -1
-  grep -oE "[0-9.]+ tokens? per second" "$logf" | tail -1
+  # Use the bench binary (exits cleanly after -n tokens). Configure as
+  # ngl_auto: no -ngl flag, no override-tensor, no expert-cache-mb.
+  # Still needs --predictor-weights for the bench to initialize but
+  # --prefetch-k 0 means predictor doesn't fire.
+  local logf=/tmp/bench_run_$$.log
+  timeout 600 $HOME/llama.cpp/build/bin/llama-moe-predictor-bench \
+    -m "$MODEL_PART1" -c 512 -n "$N_TOKENS" \
+    --predictor-weights /tmp/mixtral_stub_predictor.bin \
+    --prefetch-k 0 \
+    -p "$PROMPT" > "$logf" 2>&1 || echo "  (timed out or errored)"
+  grep -E "decode:.*tok/s|offloaded|n_gpu_layers" "$logf" | head -5
   rm -f "$logf"
   echo ""
 }
@@ -61,7 +62,7 @@ report_cache() {
 }
 
 report_cache
-run_llama_cli "A: cold ngl_auto (whatever's in cache)"
+run_bench_ngl_auto "A: cold ngl_auto (whatever's in cache)"
 report_cache
 
 echo "=== prewarming top-$K experts per layer ==="
@@ -71,7 +72,7 @@ python3 "$SCRIPT_DIR/prewarm_experts.py" \
 echo ""
 
 report_cache
-run_llama_cli "B: ngl_auto after prewarm"
+run_bench_ngl_auto "B: ngl_auto after prewarm"
 report_cache
 
 echo ""
