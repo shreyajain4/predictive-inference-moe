@@ -61,79 +61,113 @@ import sys, struct, torch, numpy as np
 
 CKPT, OUT = sys.argv[1], sys.argv[2]
 state = torch.load(CKPT, map_location="cpu", weights_only=False)
-print(f"loaded checkpoint: keys={list(state.keys())[:5]}...")
+print(f"loaded checkpoint: keys={list(state.keys())}")
 
-# lr_governor_sweep saves per-layer LR weights. Schema typically:
-#   state["weights"][layer_idx] = (W, b)
-#   W shape: (num_experts, in_features), b shape: (num_experts,)
-# where in_features = 2 * num_experts (multihot prev routing features).
-#
-# The bench's predictor expects feature_dim = 2 * num_experts + hidden_dim.
-# For Mixtral with hidden=6144, that's 16 + 6144 = 6160. We zero-pad the
-# hidden component since LR-no-hidden was trained without it.
+# lr_governor_sweep saves: {"predictors": {layer_idx: model_or_tensors}, "config": {...}}
+# Each per-layer predictor is typically a nn.Linear with .weight (out, in) and .bias (out)
+# OR a tuple (W, b).
+predictors = state.get("predictors", {})
+config = state.get("config", {})
+print(f"config: {config}")
+print(f"predictors: {len(predictors)} layers, sample key={next(iter(predictors)) if predictors else 'NONE'}")
+if predictors:
+    sample = next(iter(predictors.values()))
+    print(f"sample predictor type={type(sample).__name__}")
+    if hasattr(sample, "weight"):
+        print(f"  .weight shape: {sample.weight.shape}, dtype: {sample.weight.dtype}")
+        print(f"  .bias shape: {sample.bias.shape if sample.bias is not None else None}")
+    elif isinstance(sample, dict):
+        print(f"  dict keys: {list(sample.keys())}")
+    elif isinstance(sample, (tuple, list)) and len(sample) >= 2:
+        print(f"  tuple len={len(sample)}, first={type(sample[0]).__name__}")
 
-# Try multiple checkpoint layouts
-W_per_layer = None
-if "weights" in state and isinstance(state["weights"], dict):
-    W_per_layer = state["weights"]
-elif "per_layer_weights" in state:
-    W_per_layer = state["per_layer_weights"]
-elif "state_dict" in state:
-    # PyTorch Module checkpoint — extract by key
-    sd = state["state_dict"]
-    W_per_layer = {}
-    for k, v in sd.items():
-        if "layer" in k:
-            print(f"  found {k}: {v.shape}")
-# Fallback: dump all keys for diagnosis
-if W_per_layer is None:
-    print(f"unknown checkpoint layout. Keys: {list(state.keys())}")
-    if hasattr(state, "items"):
-        for k, v in state.items():
-            print(f"  {k}: {type(v).__name__}")
-    sys.exit(2)
+# Extract W (num_experts, in_features), b (num_experts) per layer
+def extract(pred):
+    if hasattr(pred, "weight"):
+        W = pred.weight.detach().cpu().numpy()
+        b = pred.bias.detach().cpu().numpy() if pred.bias is not None else np.zeros(W.shape[0], dtype=np.float32)
+        return W, b
+    if isinstance(pred, dict):
+        # State dict-like
+        W = None; b = None
+        for k, v in pred.items():
+            if "weight" in k.lower(): W = v
+            if "bias" in k.lower(): b = v
+        if W is None: return None
+        W = W.detach().cpu().numpy() if hasattr(W, "detach") else np.asarray(W)
+        b = b.detach().cpu().numpy() if (b is not None and hasattr(b, "detach")) else (np.asarray(b) if b is not None else np.zeros(W.shape[0]))
+        return W, b
+    if isinstance(pred, (tuple, list)) and len(pred) >= 2:
+        W = pred[0].detach().cpu().numpy() if hasattr(pred[0], "detach") else np.asarray(pred[0])
+        b = pred[1].detach().cpu().numpy() if hasattr(pred[1], "detach") else np.asarray(pred[1])
+        return W, b
+    return None
 
-# Pull out config
-n_experts = state.get("num_experts", state.get("n_experts", 8))
-n_expert_used = state.get("n_expert_used", state.get("top_k", 2))
-n_layers = state.get("n_layers", 56)
+W_per_layer = {}
+for layer_key, pred in predictors.items():
+    extracted = extract(pred)
+    if extracted is not None:
+        # layer_key might be int or str
+        try:
+            L = int(layer_key)
+        except (ValueError, TypeError):
+            L = layer_key
+        W_per_layer[L] = extracted
+
+if not W_per_layer:
+    sys.exit(f"couldn't extract weights from predictors; layout unknown")
+print(f"extracted weights for {len(W_per_layer)} layers")
+
+# Config values with Mixtral defaults
+n_experts = config.get("num_experts", config.get("n_experts", 8))
+n_expert_used = config.get("n_expert_used", config.get("top_k", 2))
+n_layers = config.get("n_layers", 56)
 hidden = 6144   # Mixtral 8x22B
 feature_dim = 2 * n_experts + hidden  # 6160
-first_layer = state.get("first_layer", 0)
+first_layer = config.get("first_layer", 0)
 print(f"config: n_layers={n_layers}, num_experts={n_experts}, hidden={hidden}, "
       f"feature_dim={feature_dim}, n_expert_used={n_expert_used}, first_L={first_layer}")
+
+# Print one sample's actual shape to verify our assumptions
+sample_L = next(iter(W_per_layer))
+W_s, b_s = W_per_layer[sample_L]
+print(f"sample layer {sample_L}: W shape {W_s.shape}, b shape {b_s.shape}")
 
 # Header
 MAGIC = 0x4D4F4550
 VERSION = 2
+in_dim_trained = W_s.shape[1]   # actual input dim of trained LR (likely 2*n_experts)
+
 with open(OUT, "wb") as f:
     f.write(struct.pack("<8I", MAGIC, VERSION, n_layers, feature_dim,
                          n_experts, hidden, first_layer, n_expert_used))
-    # Body: per-layer, per-expert: feature_dim weights + 1 bias = (feature_dim + 1) floats
-    # Layout: [num_experts, feature_dim + 1] per layer
-    # Multihot region: positions [0, 2*n_experts). Hidden region: [2*n_experts, feature_dim).
     n_padded = 0
+    n_written = 0
     for L in range(n_layers):
         if L in W_per_layer:
             W, b = W_per_layer[L]
-            W_np = W.detach().cpu().numpy() if hasattr(W, "detach") else np.asarray(W)
-            b_np = b.detach().cpu().numpy() if hasattr(b, "detach") else np.asarray(b)
-            assert W_np.shape == (n_experts, 2 * n_experts), \
-                f"W shape {W_np.shape} != ({n_experts}, {2*n_experts})"
+            if W.shape != (n_experts, in_dim_trained):
+                # If shape doesn't match, zero-pad and warn
+                print(f"  WARN layer {L}: W shape {W.shape} unexpected; zero-padding")
+                f.write(b"\x00" * (n_experts * (feature_dim + 1) * 4))
+                n_padded += 1
+                continue
             for e in range(n_experts):
                 row = np.zeros(feature_dim + 1, dtype=np.float32)
-                row[:2 * n_experts] = W_np[e]   # routing weights
-                # hidden region [2*n_experts:feature_dim] stays zero
-                row[feature_dim] = float(b_np[e])
+                # Copy trained weights into first in_dim_trained positions (multihot region)
+                copy_n = min(in_dim_trained, feature_dim)
+                row[:copy_n] = W[e][:copy_n]
+                # Hidden region stays zero
+                row[feature_dim] = float(b[e]) if e < len(b) else 0.0
                 f.write(row.tobytes())
+            n_written += 1
         else:
             n_padded += 1
-            # Zero-pad missing layer
             f.write(b"\x00" * (n_experts * (feature_dim + 1) * 4))
 
 import os
 sz = os.path.getsize(OUT)
-print(f"wrote {OUT}: {sz/1e6:.1f} MB ({n_padded} layers zero-padded for missing trainings)")
+print(f"wrote {OUT}: {sz/1e6:.1f} MB ({n_written} trained, {n_padded} zero-padded)")
 PY
 
 if [ ! -f "$OUT_BIN" ]; then
