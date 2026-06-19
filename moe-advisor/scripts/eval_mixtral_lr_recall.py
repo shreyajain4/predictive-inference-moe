@@ -38,11 +38,42 @@ def main():
 
     print(f"loading checkpoint: {args.ckpt}", flush=True)
     state = torch.load(args.ckpt, map_location="cpu", weights_only=False)
-    predictors = state["predictors"]
+    raw_predictors = state["predictors"]
     config = state.get("config", {})
     n_experts = config.get("num_experts", config.get("n_experts", 8))
     n_used = config.get("n_expert_used", config.get("top_k", 2))
-    print(f"  config: n_experts={n_experts}, n_used={n_used}, predictors={len(predictors)} layers")
+    print(f"  config: n_experts={n_experts}, n_used={n_used}, predictors={len(raw_predictors)} layers")
+
+    # Extract weights/bias per layer (predictors are state-dicts, not Module instances)
+    # Each per-layer pred is a dict like {"weight": tensor, "bias": tensor}
+    predictors: dict[int, tuple[np.ndarray, np.ndarray]] = {}
+    sample = next(iter(raw_predictors.values())) if raw_predictors else None
+    print(f"  sample predictor type={type(sample).__name__}")
+    if isinstance(sample, dict):
+        print(f"  sample keys: {list(sample.keys())}")
+    for layer_key, pred in raw_predictors.items():
+        try:
+            L = int(layer_key)
+        except (ValueError, TypeError):
+            continue
+        W = b = None
+        if isinstance(pred, dict):
+            for k, v in pred.items():
+                if "weight" in k.lower():
+                    W = v
+                if "bias" in k.lower():
+                    b = v
+        elif hasattr(pred, "weight"):
+            W = pred.weight
+            b = pred.bias
+        if W is None:
+            continue
+        W_np = W.detach().cpu().numpy() if hasattr(W, "detach") else np.asarray(W)
+        b_np = (b.detach().cpu().numpy() if (b is not None and hasattr(b, "detach"))
+                else (np.asarray(b) if b is not None else np.zeros(W_np.shape[0])))
+        predictors[L] = (W_np.astype(np.float32), b_np.astype(np.float32))
+    print(f"  extracted weights for {len(predictors)} layers; sample W shape: "
+          f"{predictors[next(iter(predictors))][0].shape}")
 
     print(f"loading parquet: {args.trace}", flush=True)
     df = pd.read_parquet(args.trace, columns=["p", "t", "l", "e"])
@@ -114,11 +145,10 @@ def main():
                 if L not in predictors:
                     n_skipped += 1
                     continue
-                pred_model = predictors[L]
+                W, b = predictors[L]
                 features = np.concatenate([feat_A, feat_B])
-                with torch.no_grad():
-                    x = torch.from_numpy(features).unsqueeze(0)
-                    logits = pred_model(x).squeeze(0).numpy()
+                # Apply linear: logits[e] = W[e, :] · features + b[e]
+                logits = W @ features + b
 
                 actual_set = {int(e) for e in actual if int(e) >= 0}
                 for k in ks:
