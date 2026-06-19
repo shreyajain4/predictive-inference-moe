@@ -25,11 +25,36 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--offsets", required=True, type=Path)
     ap.add_argument("--k", type=int, default=4,
-                    help="experts per layer to warm (first K of N)")
+                    help="experts per layer to warm. If --warm-profile is not given, "
+                         "uses the first K of N experts (arbitrary). If --warm-profile "
+                         "is given, takes the top K most-frequent experts from the profile.")
+    ap.add_argument("--warm-profile", type=Path, default=None,
+                    help="Flat text profile from npy_to_warm_profile.py. Lines: "
+                         "<layer> <expert> <hits>. If given, prewarm uses these "
+                         "(layer, expert) tuples in hits-desc order instead of first-K.")
     ap.add_argument("--parts", type=Path, nargs="*", default=[],
                     help="additional split-GGUF parts (in order). The primary file "
                          "comes from offsets JSON's gguf_path field.")
     args = ap.parse_args()
+
+    # Build a per-layer list of expert IDs to warm, either from profile or first-K
+    layer_experts: dict[int, list[int]] = {}
+    if args.warm_profile is not None:
+        # Profile format: "layer expert hits" per line, hits-desc order within each layer
+        with args.warm_profile.open() as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                parts = line.split()
+                if len(parts) < 2:
+                    continue
+                L, e = int(parts[0]), int(parts[1])
+                lst = layer_experts.setdefault(L, [])
+                if e not in lst and len(lst) < args.k:
+                    lst.append(e)
+        n_total = sum(len(v) for v in layer_experts.values())
+        print(f"warm-profile loaded: {len(layer_experts)} layers, {n_total} (layer, expert) tuples")
 
     with args.offsets.open() as f:
         offsets = json.load(f)
@@ -52,7 +77,10 @@ def main():
 
     n_experts = offsets["num_experts"]
     k = min(args.k, n_experts)
-    print(f"warming first {k} of {n_experts} experts per layer across {len(offsets['layers'])} MoE layers")
+    if args.warm_profile is None:
+        print(f"warming first {k} of {n_experts} experts per layer across {len(offsets['layers'])} MoE layers")
+    else:
+        print(f"warming top-{k} experts per layer (from user-history profile) across {len(layer_experts)} layers")
     print()
 
     bytes_read = 0
@@ -64,11 +92,18 @@ def main():
 
     for layer_info in offsets["layers"]:
         L = layer_info["layer"]
+        # Pick which expert IDs to warm for this layer
+        if args.warm_profile is None:
+            experts_to_warm = list(range(k))
+        else:
+            experts_to_warm = layer_experts.get(L, [])
+            if not experts_to_warm:
+                continue
         for kind in ("gate", "up", "down"):
             info = layer_info[kind]
             base = info["base_offset"]
             per_expert = info["per_expert_bytes"]
-            for e in range(k):
+            for e in experts_to_warm:
                 start_byte = base + e * per_expert
                 end_byte = start_byte + per_expert
                 # Figure out which file part this range is in
