@@ -181,6 +181,40 @@ The last regime to test was "model genuinely doesn't fit in CPU+VRAM and forces 
 
 **Path to positive result:** workstation gen5 PCIe hardware (RTX PRO 6000 Blackwell, ~₹179/hr on Jarvis cloud) where PCIe is competitive with DRAM AND the cache pool is large enough to hold the per-token working set. Not reachable on this consumer hardware.
 
+## CPU-side prewarm test (also negative)
+
+Last mechanism tested: instead of GPU VRAM caching, pre-load expert pages into OS page cache via Python `pread()`. ngl_auto's CPU MoE compute then reads from RAM not SSD. No PCIe involved.
+
+**Setup:** prewarm_experts.py pread()'s top-K=4 of 8 experts per layer × 30 MoE layers × 3 kinds = 22 GB into OS page cache. Bench in ngl_auto mode before vs after.
+
+**Result:**
+
+| Config | gen t/s | Cached after step |
+|---|---|---|
+| A: cold ngl_auto | **0.39** | 46.3 GB |
+| (prewarm: read 19.7 GB) | — | **37.0 GB** ← dropped 9 GB |
+| B: ngl_auto after prewarm | **0.35** | 45.8 GB |
+
+**The prewarm hurt performance, not helped.** The OS evicted 9 GB of useful pages to make room for our prewarmed pages. After B ran, Cached returned to ~46 GB because the OS re-cached what was actually being used.
+
+**Root cause:** without a real Mixtral routing profile, "first K experts per layer" is arbitrary selection. The OS page cache's natural LRU had already cached the experts that previous ngl_auto runs touched — which are the experts actually used. Our prewarm replaced correct cache contents with incorrect ones.
+
+**Sharpest final claim across the project:**
+
+*ngl_auto + Linux's reactive LRU page cache is structurally complete on consumer hardware. The OS already implements warm-from-history "for free" based on observed routing. To beat this, a predictor must anticipate future routing more accurately than recent past routing predicts. Without such a predictor, the entire MoE expert caching mechanism class (GPU-side OR CPU-side) adds no value over ngl_auto + the OS's LRU.*
+
+The complete landscape across 5 tested mechanism classes on RTX 3070:
+
+| Mechanism | Result |
+|---|---|
+| GPU snap (forced offload + cache) | LOSES (-2× across all regimes) |
+| GPU snap + warm-from-history | LOSES (+0.5 t/s noise) |
+| GPU predictor prefetch | LOSES (hurts even standalone, no snap competition) |
+| GPU snap + warm + predictor | LOSES (worst combination) |
+| **CPU prewarm into OS page cache** | **LOSES (HURTS by ~10%)** |
+
+Every "ahead-of-time pre-position" mechanism is dominated by the OS's reactive LRU. The only positive mechanism in the project is sensitivity-aware substitution (per `sensitivity_substitution_result`) — it doesn't add or pre-position traffic, it *skips* traffic by accepting quality loss.
+
 **Warm-from-history adds +0.53 t/s (+4.8%) over snapshot alone, paired across 29 prompts.** Real but small effect. Hit-rate is nearly identical between snap and snap+warm (35.78 vs 35.75%) — the warm-loaded experts don't show up as d2d_hits, yet per-prompt tok/s is consistently higher. The warm-up's `drain()` finishes before the decode timer starts, so H→D overhead is amortized and the cache state at decode-start is slightly different (different evictions during warm-up → different cold-start configuration). Single-prompt smoke showed +0.4 t/s at the edge of noise; the paired 29-prompt result confirms the direction with much tighter variance.
 
 **Snapshot is real per-prompt** (+4.8 t/s over raw forced-offload in single-prompt smoke). Aggregate hit rate is lower (35.75% vs 61.5%) because each fresh prompt routes to new experts — snapshot has to refill from scratch every iteration.
