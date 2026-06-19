@@ -16,7 +16,7 @@
 # Usage: bash bench_cpu_prewarm.sh [K] [N_TOKENS]
 #   K=4, N_TOKENS=32 by default
 
-set -e
+set -u
 
 K=${1:-4}
 N_TOKENS=${2:-32}
@@ -41,36 +41,16 @@ run_llama_cli() {
   echo ""
 }
 
-# Quick "what's in page cache for the model right now?" probe
+# Lightweight page-cache state probe via /proc/meminfo Cached: line.
+# Avoids the brittle ctypes mincore call that was segfaulting on munmap.
 report_cache() {
   echo "--- page-cache state ---"
-  for f in "$MODEL_PART1" "$MODEL_PART2"; do
-    if command -v vmtouch &>/dev/null; then
-      vmtouch -q "$f" | sed "s|^|  |"
-    else
-      # mincore-based fallback via python
-      python3 - "$f" << 'PY'
-import sys, mmap, os
-path = sys.argv[1]
-sz = os.path.getsize(path)
-# Use mincore via os
-try:
-    import ctypes
-    libc = ctypes.CDLL("libc.so.6")
-    fd = os.open(path, os.O_RDONLY)
-    addr = libc.mmap(0, sz, 1, 1, fd, 0)  # PROT_READ, MAP_SHARED
-    n_pages = (sz + 4095) // 4096
-    vec = (ctypes.c_ubyte * n_pages)()
-    libc.mincore(ctypes.c_void_p(addr), sz, vec)
-    resident = sum(1 for b in vec if b & 1)
-    print(f"  {path}: {resident}/{n_pages} pages resident ({100*resident/n_pages:.1f}%, {resident*4/1024:.0f} MB)")
-    libc.munmap(ctypes.c_void_p(addr), sz)
-    os.close(fd)
-except Exception as e:
-    print(f"  {path}: mincore failed: {e}")
-PY
-    fi
-  done
+  awk '/^Cached:|^Buffers:|^MemAvailable:/ {printf "  %-15s %s %s\n", $1, $2, $3}' /proc/meminfo
+  if command -v vmtouch &>/dev/null; then
+    echo "  (per-file via vmtouch)"
+    vmtouch -q "$MODEL_PART1" 2>&1 | sed "s|^|    |"
+    vmtouch -q "$MODEL_PART2" 2>&1 | sed "s|^|    |"
+  fi
   echo ""
 }
 
